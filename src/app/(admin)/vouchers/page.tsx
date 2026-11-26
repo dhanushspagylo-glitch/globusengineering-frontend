@@ -301,6 +301,7 @@ const VoucherPage = () => {
   const confirmDelete = () => {
     if (deleteModal.id) {
       (dispatch as any)(deleteVoucher(deleteModal.id));
+      setDeleteModal({ isOpen: false, id: null });
     }
   };
 
@@ -558,13 +559,13 @@ const VoucherPage = () => {
                               </button>
                               <ul className="dropdown-menu dropdown-menu-end shadow-sm border-0 rounded-3 py-2" aria-labelledby={`actions-${voucher.id}`}>
                                 <li>
-                                  <button className="dropdown-item d-flex align-items-center gap-2 py-2" type="button" onClick={() => handlePrintVoucherRecord(voucher)}>
+                                  <button className="dropdown-item d-flex align-items-center gap-2 py-2" type="button" onClick={(e) => { e.stopPropagation(); handlePrintVoucherRecord(voucher); }}>
                                     <i className="bi bi-printer text-primary"></i>
                                     <span className="small fw-semibold">Quick Print</span>
                                   </button>
                                 </li>
                                 <li>
-                                  <button className="dropdown-item d-flex align-items-center gap-2 py-2" type="button" onClick={() => handleExportPDFVoucherRecord(voucher)}>
+                                  <button className="dropdown-item d-flex align-items-center gap-2 py-2" type="button" onClick={(e) => { e.stopPropagation(); handleExportPDFVoucherRecord(voucher); }}>
                                     <i className="bi bi-file-earmark-pdf text-danger"></i>
                                     <span className="small fw-semibold">Export PDF</span>
                                   </button>
@@ -576,7 +577,7 @@ const VoucherPage = () => {
                                       <button 
                                         className="dropdown-item d-flex align-items-center gap-2 py-2 text-danger" 
                                         type="button"
-                                        onClick={() => handleDeleteParams(voucher.id)}
+                                        onClick={(e) => { e.stopPropagation(); handleDeleteParams(voucher.id); }}
                                       >
                                         <i className="bi bi-trash3"></i>
                                         <span className="small fw-semibold">Remove Record</span>
