@@ -47,7 +47,7 @@ const InvoiceTable: React.FC = () => {
 
   const handleTabChange = (tab: any) => { setActiveTab(tab); const params = new URLSearchParams(searchParams.toString()); params.set('tab', tab); router.push(`${pathname}?${params.toString()}`); };
 
-  const [downloadingItem, setDownloadingItem] = useState<{ item: any, type: 'invoice' | 'inward', layout?: InvoiceLayoutFormat, copies?: string } | null>(null);
+  const [downloadingItem, setDownloadingItem] = useState<{ item: any, type: 'invoice' | 'inward', layout?: InvoiceLayoutFormat, copies?: string, typeParam?: string } | null>(null);
   const downloadRef = React.useRef<HTMLDivElement>(null);
   const { settings: invoiceSettings } = useSelector((state: RootState) => state.invoices);
   const [layoutModal, setLayoutModal] = useState<{
@@ -69,7 +69,7 @@ const InvoiceTable: React.FC = () => {
       const captureAndDownload = async () => {
         await new Promise(resolve => setTimeout(resolve, 800));
         if (downloadRef.current) {
-          const pageElements = downloadRef.current.querySelectorAll('.modern-invoice-page, .invoice-page-container');
+          const pageElements = downloadRef.current.querySelectorAll('.modern-invoice-page, .invoice-page, .invoice-page-container');
           const pdf = new jsPDF('p', 'mm', 'a4');
           const pdfWidth = pdf.internal.pageSize.getWidth();
           const pdfHeight = pdf.internal.pageSize.getHeight();
@@ -89,8 +89,10 @@ const InvoiceTable: React.FC = () => {
           }
 
           const copySuffix = downloadingItem.copies ? `_${downloadingItem.copies.replace(/,/g, '_')}` : '';
+          const isWopDoc = downloadingItem.typeParam === 'WOP' || downloadingItem.item.type === 'WOP';
+          const docPrefix = isWopDoc ? 'DELIVERY_CHALLAN' : 'INVOICE';
           const fileName = downloadingItem.type === 'invoice'
-            ? `INVOICE_${downloadingItem.item.invoiceNumber || downloadingItem.item.id}_${(downloadingItem.layout || 'CLASSIC').toUpperCase()}${copySuffix}.pdf`
+            ? `${docPrefix}_${downloadingItem.item.invoiceNumber || downloadingItem.item.challanNumber || downloadingItem.item.id}_${(downloadingItem.layout || 'CLASSIC').toUpperCase()}${copySuffix}.pdf`
             : `INWARD_${downloadingItem.item.inwardNo || downloadingItem.item.id}.pdf`;
           pdf.save(fileName);
           setDownloadingItem(null);
@@ -115,14 +117,15 @@ const InvoiceTable: React.FC = () => {
     router.push(`/logistics-print?type=inward&id=${item.id}&print=true`);
   };
 
-  const handleExportPDFRecord = (item: any, defaultCopies = 'ORIGINAL,DUPLICATE,TRIPLICATE') => {
+  const handleExportPDFRecord = (item: any, defaultCopies = 'ORIGINAL,DUPLICATE,TRIPLICATE', typeParam?: string) => {
     const isInvoice = !!item.invoiceNumber;
     if (isInvoice) {
       setLayoutModal({
         isOpen: true,
         item,
         actionType: 'export',
-        defaultCopies
+        defaultCopies,
+        typeParam
       });
       return;
     }
@@ -424,9 +427,25 @@ const InvoiceTable: React.FC = () => {
                                 <li>
                                   <button
                                     className="dropdown-item d-flex align-items-center gap-2 py-2 small fw-bold text-danger"
-                                    onClick={(e) => { e.stopPropagation(); handlePrintRecord(item, 'ORIGINAL,DUPLICATE', 'WOP'); }}
+                                    onClick={(e) => { e.stopPropagation(); handlePrintRecord(item, 'ORIGINAL,DUPLICATE,TRIPLICATE', 'WOP'); }}
                                   >
                                     <i className="bi bi-printer-fill"></i> WOP Print
+                                  </button>
+                                </li>
+                                <li>
+                                  <button
+                                    className="dropdown-item d-flex align-items-center gap-2 py-2 small text-primary"
+                                    onClick={(e) => { e.stopPropagation(); handleExportPDFRecord(item, 'ORIGINAL,DUPLICATE,TRIPLICATE', 'WP'); }}
+                                  >
+                                    <i className="bi bi-file-earmark-pdf"></i> WP Export PDF
+                                  </button>
+                                </li>
+                                <li>
+                                  <button
+                                    className="dropdown-item d-flex align-items-center gap-2 py-2 small text-danger"
+                                    onClick={(e) => { e.stopPropagation(); handleExportPDFRecord(item, 'ORIGINAL,DUPLICATE,TRIPLICATE', 'WOP'); }}
+                                  >
+                                    <i className="bi bi-file-earmark-pdf"></i> WOP Export PDF
                                   </button>
                                 </li>
                               </>
@@ -474,6 +493,7 @@ const InvoiceTable: React.FC = () => {
                   invoice={downloadingItem.item}
                   company={activeCompany}
                   settings={invoiceSettings}
+                  typeParam={downloadingItem.typeParam}
                   copyType={downloadingItem.copies}
                 />
               ) : (
@@ -481,6 +501,7 @@ const InvoiceTable: React.FC = () => {
                   invoice={downloadingItem.item}
                   company={activeCompany}
                   settings={invoiceSettings}
+                  typeParam={downloadingItem.typeParam}
                   copiesProp={downloadingItem.copies}
                 />
               )
@@ -524,7 +545,8 @@ const InvoiceTable: React.FC = () => {
               item,
               type: 'invoice',
               layout: chosenLayout,
-              copies: chosenCopies || 'ORIGINAL,DUPLICATE,TRIPLICATE'
+              copies: chosenCopies || 'ORIGINAL,DUPLICATE,TRIPLICATE',
+              typeParam
             });
           }
         }}

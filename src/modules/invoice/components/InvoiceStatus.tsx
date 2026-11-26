@@ -314,7 +314,7 @@ const InvoiceStatus = () => {
                                   <li>
                                     <button 
                                       className="dropdown-item d-flex align-items-center gap-2 py-2 small" 
-                                      onClick={() => setLayoutModal({ isOpen: true, item: inv, defaultCopies: 'ORIGINAL,DUPLICATE', typeParam: 'WOP' })}
+                                      onClick={() => setLayoutModal({ isOpen: true, item: inv, defaultCopies: 'ORIGINAL,DUPLICATE,TRIPLICATE', typeParam: 'WOP' })}
                                     >
                                       <i className="bi bi-file-earmark-text text-danger"></i> WOP Print
                                     </button>

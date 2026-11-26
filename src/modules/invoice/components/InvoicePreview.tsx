@@ -60,7 +60,7 @@ const InvoicePreview: React.FC<InvoicePreviewProps> = ({ invoice, company, hideC
 
   const handleDownload = async (copiesToUse?: string) => {
     if (!invoiceRef.current) return;
-    const pageElements = invoiceRef.current.querySelectorAll('.modern-invoice-page, .invoice-page-container');
+    const pageElements = invoiceRef.current.querySelectorAll('.modern-invoice-page, .invoice-page, .invoice-page-container');
     const pdf = new jsPDF('p', 'mm', 'a4');
     const pdfWidth = pdf.internal.pageSize.getWidth();
     const pdfHeight = pdf.internal.pageSize.getHeight();
@@ -89,7 +89,9 @@ const InvoicePreview: React.FC<InvoicePreviewProps> = ({ invoice, company, hideC
 
     const activeCopies = copiesToUse || currentCopies;
     const copySuffix = activeCopies ? `_${activeCopies.replace(/,/g, '_')}` : '';
-    pdf.save(`INVOICE_${invoice.invoiceNumber || invoice.id}_${layout.toUpperCase()}${copySuffix}.pdf`);
+    const isWopDoc = searchParams.get('type') === 'WOP' || invoice.type === 'WOP';
+    const docPrefix = isWopDoc ? 'DELIVERY_CHALLAN' : 'INVOICE';
+    pdf.save(`${docPrefix}_${invoice.invoiceNumber || invoice.challanNumber || invoice.id}_${layout.toUpperCase()}${copySuffix}.pdf`);
   };
 
   React.useEffect(() => {

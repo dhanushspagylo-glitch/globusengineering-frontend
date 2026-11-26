@@ -67,8 +67,11 @@ const InvoiceEmailReminderToggle: React.FC<InvoiceEmailReminderToggleProps> = ({
       if (data.customerEmail) {
         setRecipientEmail(data.customerEmail);
       }
-    } catch (error) {
-      console.error('Failed to fetch reminder status:', error);
+    } catch (error: any) {
+      // 404 means reminder status route is not registered or optional; gracefully fallback to enabled
+      if (error?.response?.status !== 404) {
+        console.warn('Failed to fetch reminder status:', error?.message || error);
+      }
       // Default to true on failure so reminders aren't accidentally shown as disabled
       setReminderEnabled(true);
     }

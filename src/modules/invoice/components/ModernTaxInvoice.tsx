@@ -229,14 +229,12 @@ export const ModernTaxInvoice: React.FC<ModernTaxInvoiceProps> = ({
   const effectiveCopies = copyType || urlCopies;
 
   let copyList: string[] = [''];
-  if (!isWOP) {
-    if (effectiveCopies) {
-      copyList = effectiveCopies.split(',').map(s => s.trim()).filter(Boolean);
-    } else if (isPrint) {
-      copyList = ['ORIGINAL', 'DUPLICATE', 'TRIPLICATE'];
-    } else {
-      copyList = ['ORIGINAL'];
-    }
+  if (effectiveCopies) {
+    copyList = effectiveCopies.split(',').map(s => s.trim()).filter(Boolean);
+  } else if (isPrint) {
+    copyList = ['ORIGINAL', 'DUPLICATE', 'TRIPLICATE'];
+  } else {
+    copyList = ['ORIGINAL'];
   }
 
   return (

@@ -265,14 +265,12 @@ const IndustrialInvoice: React.FC<IndustrialInvoiceProps> = ({ invoice, company,
    const effectiveCopies = copiesProp || urlCopies;
    
    let copyTypes = [''];
-   if (!isWOP) {
-      if (effectiveCopies) {
-         copyTypes = effectiveCopies.split(',').map(s => s.trim()).filter(Boolean);
-      } else if (isPrint) {
-         copyTypes = ['ORIGINAL', 'DUPLICATE', 'TRIPLICATE'];
-      } else {
-         copyTypes = ['ORIGINAL'];
-      }
+   if (effectiveCopies) {
+      copyTypes = effectiveCopies.split(',').map(s => s.trim()).filter(Boolean);
+   } else if (isPrint) {
+      copyTypes = ['ORIGINAL', 'DUPLICATE', 'TRIPLICATE'];
+   } else {
+      copyTypes = ['ORIGINAL'];
    }
 
    const pagesData = paginate(displayItems);
@@ -560,7 +558,7 @@ const InvoicePage = ({ invoice, company, settings, items, isLastPage, pageIndex,
 
    return (
       <div
-         className="invoice-page"
+         className="invoice-page invoice-page-container"
          style={{
             pageBreakAfter: isLastCopyAndPage ? 'avoid' : 'always',
             breakAfter: isLastCopyAndPage ? 'avoid' : 'page',

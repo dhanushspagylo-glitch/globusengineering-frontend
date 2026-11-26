@@ -9,7 +9,7 @@ export function middleware(request: NextRequest) {
   if (pathname.startsWith('/api/proxy')) {
     const targetUrl = new URL(
       pathname.replace('/api/proxy', '/api'),
-      'http://localhost:3001'
+      process.env.BACKEND_URL || 'http://localhost:3001'
     );
     return NextResponse.rewrite(targetUrl);
   }
