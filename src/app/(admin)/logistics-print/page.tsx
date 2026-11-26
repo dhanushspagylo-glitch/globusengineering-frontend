@@ -1,0 +1,337 @@
+'use client';
+
+import React, { Suspense, useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { useSelector, useDispatch } from 'react-redux';
+import { RootState } from '@/redux/store';
+import IndustrialDocument from '@/components/shared/IndustrialDocument';
+import VendorChallanFormatA from '@/components/shared/VendorChallanFormatA';
+import VendorChallanFormatB from '@/components/shared/VendorChallanFormatB';
+import { fetchInwardById } from '@/redux/features/inwardSlice';
+import { fetchOutwardById } from '@/redux/features/outwardSlice';
+import { fetchChallanById } from '@/redux/features/challanSlice';
+import { fetchVouchers } from '@/redux/features/voucherSlice';
+import { fetchCustomers } from '@/redux/features/customerSlice';
+import { fetchVendors } from '@/redux/features/vendorSlice';
+import Loader from '@/components/Loader';
+import BackButton from '@/components/BackButton';
+import Link from 'next/link';
+import api from '@/lib/axios';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
+import * as XLSX from 'xlsx';
+
+const PrintContent = () => {
+   const searchParams = useSearchParams();
+   const dispatch = useDispatch();
+   const type = searchParams.get('type') as 'inward' | 'outward' | 'challan' | 'voucher';
+   const id = searchParams.get('id');
+   const download = searchParams.get('download') === 'true';
+   const print = searchParams.get('print') === 'true';
+
+   const { company } = useSelector((state: RootState) => state.auth);
+   const { items: customers } = useSelector((state: RootState) => state.customers);
+   const { items: vendors } = useSelector((state: RootState) => state.vendors);
+   const inwardData = useSelector((state: RootState) => state.inward.items);
+   const outwardData = useSelector((state: RootState) => state.outward.items);
+   const challanData = useSelector((state: RootState) => state.challan.items);
+   const voucherData = useSelector((state: RootState) => state.voucher.items);
+
+   const [data, setData] = useState<any>(null);
+   const [loading, setLoading] = useState(true);
+   const [showDeclaration, setShowDeclaration] = useState(false);
+   const [challanFormat, setChallanFormat] = useState<'A' | 'B'>('A');
+   const accentColor = company?.invoiceSettings?.accentColor || '#0d6efd';
+
+   const isOutwardChallan = type === 'outward' || (type === 'inward' && data?.status === 'cancelled');
+   const printRef = React.useRef<HTMLDivElement>(null);
+
+   useEffect(() => {
+      if (!id || !type || !company?.id) return;
+
+      const fetchData = async () => {
+         setLoading(true);
+
+         const fetchPromises = [];
+         if (customers.length === 0) fetchPromises.push((dispatch as any)(fetchCustomers({ company_id: company.id, limit: 1000 })));
+         if (vendors.length === 0) fetchPromises.push((dispatch as any)(fetchVendors({ company_id: company.id, limit: 1000 })));
+
+         if (type === 'inward') {
+            fetchPromises.push((dispatch as any)(fetchInwardById(id)));
+         } else if (type === 'outward') {
+            fetchPromises.push((dispatch as any)(fetchOutwardById(id)));
+         } else if (type === 'challan') {
+            fetchPromises.push((dispatch as any)(fetchChallanById(id)));
+         } else if (type === 'voucher') {
+            fetchPromises.push((dispatch as any)(fetchVouchers({ company_id: company.id, id })));
+         }
+
+         try {
+            await Promise.all(fetchPromises);
+         } catch (err) {
+            console.error("Fetch failed", err);
+         } finally {
+            setLoading(false);
+         }
+      };
+
+      fetchData();
+   }, [id, type, company?.id, dispatch]);
+
+   useEffect(() => {
+      if (!loading && id) {
+         let found = null;
+         const tid = String(id);
+         if (type === 'inward') found = inwardData.find(i => String(i.id) === tid);
+         else if (type === 'outward') found = outwardData.find(o => String(o.id) === tid);
+         else if (type === 'challan') found = challanData.find(c => String(c.id) === tid);
+         else if (type === 'voucher') found = voucherData.find(v => String(v.id) === tid);
+
+         if (found) {
+            let enrichedData: any = { ...found };
+            const anyFound = found as any;
+            if (type === 'outward') {
+               const pType = anyFound.partyType || anyFound.party_type || (anyFound.vendorId || anyFound.vendor_id ? 'vendor' : 'customer');
+               if (pType === 'vendor') {
+                  const vId = anyFound.vendorId || anyFound.vendor_id;
+                  let vendorInfo = vId ? vendors.find(v => String(v.id) === String(vId)) : null;
+                  if (!vendorInfo && anyFound.vendorName) {
+                     vendorInfo = vendors.find(v => (v.name || v.company) === anyFound.vendorName);
+                  }
+                  if (vendorInfo) {
+                     const addrParts = [vendorInfo.street1, vendorInfo.street2, vendorInfo.area, vendorInfo.city, vendorInfo.state, vendorInfo.pinCode].filter(Boolean);
+                     enrichedData.address = enrichedData.address || addrParts.join(', ');
+                     enrichedData.gstin = enrichedData.gstin || vendorInfo.gst || (vendorInfo as any).gstin || '';
+                     enrichedData.pan = enrichedData.pan || (vendorInfo as any).pan || '';
+                     enrichedData.phone = enrichedData.phone || vendorInfo.phone || '';
+                  }
+               } else {
+                  const cId = anyFound.customerId || anyFound.customer_id;
+                  let customerInfo = cId ? customers.find(c => String(c.id) === String(cId)) : null;
+                  if (!customerInfo && anyFound.customerName) {
+                     customerInfo = customers.find(c => (c.name || c.company) === anyFound.customerName);
+                  }
+                  if (customerInfo) {
+                     const addrParts = [customerInfo.street1, customerInfo.street2, customerInfo.area, customerInfo.city, customerInfo.state, customerInfo.pinCode].filter(Boolean);
+                     enrichedData.address = enrichedData.address || addrParts.join(', ');
+                     enrichedData.gstin = enrichedData.gstin || customerInfo.gst || (customerInfo as any).gstin || '';
+                     enrichedData.pan = enrichedData.pan || (customerInfo as any).pan || '';
+                     enrichedData.phone = enrichedData.phone || customerInfo.phone || '';
+                  }
+               }
+               enrichedData.vehicleNo = anyFound.vehicleNo || anyFound.vehicle_no || anyFound.vehicle || '';
+               enrichedData.challanNo = anyFound.challanNo || anyFound.challan_no || '';
+               enrichedData.coatingName = anyFound.coatingName || anyFound.coating_name || '';
+               enrichedData.notes = anyFound.notes || anyFound.specialInstructions || '';
+               enrichedData.customerNotes = anyFound.customerNotes || anyFound.customer_notes || '';
+               enrichedData.amount = anyFound.amount ?? anyFound.customerJobValue ?? anyFound.jobValue ?? 0;
+               enrichedData.customerJobValue = anyFound.customerJobValue ?? anyFound.jobValue ?? (anyFound.amount ? anyFound.amount : '');
+               enrichedData.jobValue = anyFound.jobValue ?? anyFound.customerJobValue ?? (anyFound.amount ? anyFound.amount : '');
+            }
+            setData(enrichedData);
+         }
+      }
+   }, [loading, inwardData, outwardData, challanData, voucherData, id, type, vendors, customers]);
+
+   useEffect(() => {
+      if (data && print && !download) {
+         const timer = setTimeout(() => {
+            window.print();
+         }, 1200);
+         return () => clearTimeout(timer);
+      }
+
+      if (data && download) {
+         const triggerDownload = async () => {
+            // Wait for images and layout to settle
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            if (printRef.current) {
+               const canvas = await html2canvas(printRef.current, {
+                  scale: 2,
+                  useCORS: true,
+                  logging: false,
+               });
+               const imgData = canvas.toDataURL('image/png');
+               const pdf = new jsPDF('p', 'mm', 'a4');
+               const imgProps = pdf.getImageProperties(imgData);
+               const pdfWidth = pdf.internal.pageSize.getWidth();
+               const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+               pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+               pdf.save(`${type.toUpperCase()}_${data.inwardNo || data.outwardNo || data.challanNo || data.voucherNo || id}.pdf`);
+            }
+         };
+         triggerDownload();
+      }
+   }, [data, print, download, type, id]);
+
+   const handleExport = async () => {
+      if (!printRef.current) return;
+      const canvas = await html2canvas(printRef.current, { scale: 2, useCORS: true });
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const imgProps = pdf.getImageProperties(imgData);
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`${type.toUpperCase()}_${data?.inwardNo || data?.outwardNo || data?.challanNo || data?.voucherNo || id}.pdf`);
+   };
+
+   const handleExportExcel = () => {
+      if (!data) return;
+
+      const wb = XLSX.utils.book_new();
+      const headerData = [
+         ["Outward No", data.outwardNo || ""],
+         ["Date", data.date ? new Date(data.date).toLocaleDateString('en-GB') : ""],
+         [data.partyType === 'vendor' ? "Vendor Name" : "Customer Name", data.vendorName || data.customerName || data.partyName || ""],
+         ["Coating Name", data.coatingName || ""],
+         ["Purpose", data.purpose || ""],
+         ["Vehicle No", data.vehicleNo || data.driverName || ""],
+         [data.partyType === 'customer' ? "Job Value" : "Job Value", data.customerJobValue || data.jobValue || (data.amount ? data.amount : "") || ""],
+         ["Notes", data.notes || ""],
+         [],
+         ["S.NO", "DESCRIPTION", "QUANTITY", "UNIT"]
+      ];
+
+      const itemsData = (data.items || []).map((item: any, idx: number) => [
+         idx + 1,
+         item.description || "",
+         Number(item.quantity) || 0,
+         item.unit || "pcs"
+      ]);
+
+      const totalQty = itemsData.reduce((sum: number, row: any) => sum + (Number(row[2]) || 0), 0);
+      itemsData.push(["", "TOTAL QUANTITY", totalQty, ""]);
+
+      const wsData = [...headerData, ...itemsData];
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+      XLSX.utils.book_append_sheet(wb, ws, "Outward");
+      XLSX.writeFile(wb, `Outward_${data.outwardNo || 'Vendor'}.xlsx`);
+   };
+
+   if (!id || !type) return <div className="p-5 text-center text-warning">Invalid print parameters provided.</div>;
+   if (loading || !company?.id) return <div className="p-5 text-center"><Loader text="Preparing Document..." /></div>;
+   if (!data) return (
+      <div className="p-5 text-center">
+         <div className="text-danger mb-3 font-weight-bold">Document not found or access denied.</div>
+         <p className="text-muted small">ID: {id} | Type: {type}</p>
+         <button className="btn btn-outline-primary btn-sm mt-3" onClick={() => window.location.reload()}>Retry Loading</button>
+      </div>
+   );
+
+   return (
+      <div className="print-preview-container container py-4">
+         <div className="no-print d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3 p-3 bg-white rounded-4 shadow-sm border w-100" style={{ maxWidth: '190mm' }}>
+            <div className="d-flex align-items-center gap-3">
+               <BackButton />
+               <h4 className="m-0 fw-bold text-dark text-capitalize">{type} Preview</h4>
+            </div>
+
+            <div className="d-flex align-items-center gap-3 flex-wrap">
+               {isOutwardChallan && (
+                  <div className="d-flex align-items-center gap-0 rounded-pill border overflow-hidden" style={{ border: '1.5px solid #dee2e6' }}>
+                     <button
+                        id="formatPickerA"
+                        className={`btn btn-sm px-3 py-1 fw-bold rounded-0 ${challanFormat === 'A' ? 'btn-dark' : 'btn-outline-dark border-0'}`}
+                        style={{ fontSize: '12px', borderRadius: '20px 0 0 20px' }}
+                        onClick={() => setChallanFormat('A')}
+                     >
+                        📄 Format A
+                     </button>
+                     <button
+                        id="formatPickerB"
+                        className={`btn btn-sm px-3 py-1 fw-bold rounded-0 ${challanFormat === 'B' ? 'btn-dark' : 'btn-outline-dark border-0'}`}
+                        style={{ fontSize: '12px', borderRadius: '0 20px 20px 0' }}
+                        onClick={() => setChallanFormat('B')}
+                     >
+                        📋 Format B
+                     </button>
+                  </div>
+               )}
+
+               {!isOutwardChallan && (
+                  <div className="form-check form-switch mb-0">
+                     <input
+                        className="form-check-input"
+                        type="checkbox"
+                        id="declarationToggle"
+                        checked={showDeclaration}
+                        onChange={(e) => setShowDeclaration(e.target.checked)}
+                     />
+                     <label className="form-check-label small fw-bold text-muted" htmlFor="declarationToggle">
+                        Include Declaration
+                     </label>
+                  </div>
+               )}
+
+               <div className="vr mx-2 opacity-25" style={{ height: '24px' }}></div>
+               <button className="btn btn-outline-dark d-flex align-items-center gap-2 px-3 fw-semibold rounded-pill" onClick={() => window.print()}>
+                  <i className="bi bi-printer"></i> Print
+               </button>
+               <button className="btn btn-primary d-flex align-items-center gap-2 px-4 fw-bold rounded-pill shadow-sm" style={{ backgroundColor: accentColor, borderColor: accentColor }} onClick={handleExport}>
+                  <i className="bi bi-filetype-pdf"></i> Export PDF
+               </button>
+               {isOutwardChallan && (
+                  <button className="btn btn-success d-flex align-items-center gap-2 px-4 fw-bold rounded-pill shadow-sm" onClick={handleExportExcel}>
+                     <i className="bi bi-file-earmark-excel"></i> Export Excel
+                  </button>
+               )}
+            </div>
+         </div>
+
+         <div ref={printRef}>
+            {isOutwardChallan ? (
+               challanFormat === 'A' ? (
+                  <VendorChallanFormatA
+                     data={data}
+                     company={company}
+                     settings={company?.invoiceSettings}
+                  />
+               ) : (
+                  <VendorChallanFormatB
+                     data={data}
+                     company={company}
+                     settings={company?.invoiceSettings}
+                  />
+               )
+            ) : (
+               <IndustrialDocument
+                  data={data}
+                  type={type}
+                  company={company}
+                  settings={{ ...company?.invoiceSettings, showDeclaration }}
+               />
+            )}
+         </div>
+
+         <style jsx>{`
+            .print-preview-container {
+               min-height: 100vh;
+               background: #f8f9fa;
+               display: flex;
+               flex-direction: column;
+               align-items: center;
+            }
+            @media print {
+               .no-print { display: none !important; }
+               .print-preview-container { 
+                  background: white !important; 
+                  padding: 0 !important;
+                  margin: 0 !important;
+                  display: block !important;
+               }
+               body { margin: 0; padding: 0; }
+            }
+         `}</style>
+      </div>
+   );
+};
+
+export default function LogisticsPrintPage() {
+   return (
+      <Suspense fallback={<Loader text="Loading..." />}>
+         <PrintContent />
+      </Suspense>
+   );
+}

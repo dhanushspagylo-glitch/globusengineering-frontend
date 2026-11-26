@@ -1,0 +1,725 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import Link from 'next/link';
+import { RootState } from '@/redux/store';
+import { fetchInvoices, setInvoicePage } from '@/redux/features/invoiceSlice';
+
+import { fetchCustomers } from '@/redux/features/customerSlice';
+import { fetchInwards } from '@/redux/features/inwardSlice';
+import ModuleGuard from '@/components/ModuleGuard';
+import { useRouter } from 'next/navigation';
+import Loader from '@/components/Loader';
+
+import ExportExcel from '@/components/shared/ExportExcel';
+import PartyTypeToggle from '@/components/shared/PartyTypeToggle';
+import IndustrialDocument from '@/components/shared/IndustrialDocument';
+import Breadcrumb from '@/components/Breadcrumb';
+import PaginationComponent from '@/components/shared/Pagination';
+import SortableHeader from '@/components/shared/SortableHeader';
+import InvoiceEmailReminderToggle from '@/modules/invoice/components/InvoiceEmailReminderToggle';
+import api from '@/lib/axios';
+
+
+const PendingPaymentPage = () => {
+  const [mounted, setMounted] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedCustomerId, setSelectedCustomerId] = useState("");
+  // Strictly lock partyType to customer
+  const partyType: 'all' | 'customer' | 'vendor' = 'customer';
+  const [printGroup, setPrintGroup] = useState<any>(null);
+  const [reminderInvoice, setReminderInvoice] = useState<any | null>(null);
+  const [invoiceSelectGroup, setInvoiceSelectGroup] = useState<any | null>(null);
+  const [closeModalGroup, setCloseModalGroup] = useState<any | null>(null);
+  const [closingInvoiceId, setClosingInvoiceId] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const [sortField, setSortField] = useState('date');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  const router = useRouter();
+  const dispatch = useDispatch();
+  const { company: activeCompany } = useSelector((state: RootState) => state.auth);
+  const { items, pagination, loading } = useSelector((state: RootState) => state.invoices);
+  const { items: customers } = useSelector((state: RootState) => state.customers);
+  const { items: inwards } = useSelector((state: RootState) => state.inward);
+
+  useEffect(() => {
+    setMounted(true);
+    if (activeCompany?.id) {
+      (dispatch as any)(fetchInvoices({ company_id: activeCompany.id, limit: 1000, status: 'pending', partyType }));
+      (dispatch as any)(fetchCustomers({ company_id: activeCompany.id, limit: 1000 }));
+      (dispatch as any)(fetchInwards({ company_id: activeCompany.id, limit: 1000 }));
+    }
+  }, [dispatch, activeCompany?.id, partyType]);
+
+  if (!mounted) return null;
+
+  // Filter for pending/billed but not paid invoices
+  const pendingInvoices = items.filter(inv => {
+    const grand = inv.grandTotal || 0;
+    const paid = inv.paidAmount || 0;
+    const balance = grand - paid;
+    const status = (inv.status || '').toLowerCase().trim();
+
+    // If balance is <= 0.5, invoice is fully paid / settled
+    if (balance <= 0.5) return false;
+
+    // Check if status is paid, completed, closed, settled, or cancelled
+    const isClosedOrPaid = status === 'paid' || status === 'completed' || status === 'closed' || status === 'settled';
+    const isCancelled = status === 'cancelled';
+    if (isClosedOrPaid || isCancelled) return false;
+
+    // Invoice must have an actual total
+    if (grand <= 0) return false;
+
+    // Strictly lock to customer - exclude vendor records
+    const isVendor = (inv as any).partyType === 'vendor' || (inv as any).party_type === 'vendor' || !!(inv as any).vendorId;
+    if (isVendor) return false;
+
+    const isWOP = inv.billType === 'Without Process' || inv.billType === 'without_process' || inv.bill_type === 'Without Process' || inv.bill_type === 'without_process' || (inv.type === 'WOP');
+    if (isWOP) return false;
+
+    const matchesSearch =
+      (inv.customerName?.toLowerCase() ?? '').includes(searchTerm.toLowerCase()) ||
+      (inv.invoiceNumber?.toLowerCase() ?? '').includes(searchTerm.toLowerCase()) ||
+      (inv.poNo?.toLowerCase() ?? '').includes(searchTerm.toLowerCase());
+    const matchesCustomer = !selectedCustomerId || String(inv.customerId) === String(selectedCustomerId);
+
+    return matchesSearch && matchesCustomer;
+  });
+
+  const groupedInvoices = pendingInvoices.reduce((acc, inv) => {
+    const key = inv.customerId || 'unknown';
+    if (!acc[key]) {
+      acc[key] = {
+        customerId: key,
+        customerName: inv.customerName || 'Unknown Customer',
+        invoices: [],
+        totalPending: 0,
+        firstInvoice: inv
+      };
+    }
+    acc[key].invoices.push(inv);
+    acc[key].totalPending += Math.max(0, (inv.grandTotal || 0) - (inv.paidAmount || 0));
+    return acc;
+  }, {} as Record<string, { customerId: string, customerName: string, invoices: any[], totalPending: number, firstInvoice: any }>);
+
+  const calculateOverdueDays = (dueDate: string) => {
+    if (!dueDate) return 0;
+    const due = new Date(dueDate);
+    const today = new Date();
+    const diffTime = today.getTime() - due.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    return diffDays > 0 ? diffDays : 0;
+  };
+
+  let customerGroups = Object.values(groupedInvoices).filter(g => g.totalPending > 0.5);
+
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortOrder('asc');
+    }
+  };
+
+  customerGroups.sort((a, b) => {
+    let aVal: any = '';
+    let bVal: any = '';
+
+    const latestA = a.invoices.reduce((latest, current) => {
+      const latestDate = latest.date ? new Date(latest.date).getTime() : 0;
+      const currentDate = current.date ? new Date(current.date).getTime() : 0;
+      return currentDate > latestDate ? current : latest;
+    }, a.invoices[0]);
+
+    const latestB = b.invoices.reduce((latest, current) => {
+      const latestDate = latest.date ? new Date(latest.date).getTime() : 0;
+      const currentDate = current.date ? new Date(current.date).getTime() : 0;
+      return currentDate > latestDate ? current : latest;
+    }, b.invoices[0]);
+
+    if (sortField === 'customerName') {
+      aVal = a.customerName;
+      bVal = b.customerName;
+    } else if (sortField === 'poNo') {
+      aVal = latestA.poNo || '';
+      bVal = latestB.poNo || '';
+    } else if (sortField === 'dcNo') {
+      aVal = latestA.dcNo || '';
+      bVal = latestB.dcNo || '';
+    } else if (sortField === 'invoiceNumber') {
+      aVal = latestA.invoiceNumber || '';
+      bVal = latestB.invoiceNumber || '';
+    } else if (sortField === 'date') {
+      aVal = latestA.date ? new Date(latestA.date).getTime() : 0;
+      bVal = latestB.date ? new Date(latestB.date).getTime() : 0;
+    } else if (sortField === 'totalPending') {
+      aVal = a.totalPending;
+      bVal = b.totalPending;
+    } else if (sortField === 'overdue') {
+      aVal = Math.max(0, ...a.invoices.map(inv => calculateOverdueDays(inv.dueDate)));
+      bVal = Math.max(0, ...b.invoices.map(inv => calculateOverdueDays(inv.dueDate)));
+    }
+
+    if (aVal < bVal) return sortOrder === 'asc' ? -1 : 1;
+    if (aVal > bVal) return sortOrder === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  const totalPages = Math.ceil(customerGroups.length / pagination.itemsPerPage);
+  const paginatedGroups = customerGroups.slice(
+    (pagination.currentPage - 1) * pagination.itemsPerPage,
+    pagination.currentPage * pagination.itemsPerPage
+  );
+
+  const handlePrintPending = (group: any) => {
+    setPrintGroup(group);
+    setTimeout(() => window.print(), 300);
+  };
+
+  // Handle toggling an invoice between CLOSED and BILLED (Open)
+  const handleToggleClose = async (inv: any) => {
+    try {
+      setClosingInvoiceId(String(inv.id));
+      const currentStatus = (inv.status || '').toLowerCase().trim();
+      const targetStatus = currentStatus === 'closed' ? 'BILLED' : 'CLOSED';
+
+      const res = await api.patch(`/invoices/${inv.id}/toggle-status`, { status: targetStatus });
+      if (res.data?.success) {
+        setActionFeedback({
+          message: `Invoice #${inv.invoiceNumber || inv.id} marked as ${targetStatus === 'CLOSED' ? 'Closed (Removed from Pending)' : 'Re-opened'}.`,
+          type: 'success'
+        });
+        setTimeout(() => setActionFeedback(null), 4000);
+        if (activeCompany?.id) {
+          (dispatch as any)(fetchInvoices({ company_id: activeCompany.id, limit: 1000, status: 'pending', partyType }));
+        }
+      }
+    } catch (err: any) {
+      setActionFeedback({
+        message: err.response?.data?.error || 'Failed to update invoice status',
+        type: 'error'
+      });
+      setTimeout(() => setActionFeedback(null), 4000);
+    } finally {
+      setClosingInvoiceId(null);
+      setCloseModalGroup(null);
+      setInvoiceSelectGroup(null);
+    }
+  };
+
+  // Build the correct voucher creation URL — vendor invoices need partyType=vendor
+  const getVoucherUrl = (inv: any) => {
+    const inward = inwards.find(iw => String(iw.id) === String(inv.inwardId));
+    const vendorId = (inward as any)?.vendorId || (inward as any)?.vendor_id;
+    if (vendorId) {
+      return `/vouchers/new?partyType=vendor&vendorId=${vendorId}&invoiceId=${inv.id}&redirect=/payments/pending`;
+    }
+    return `/vouchers/new?partyType=customer&customerId=${inv.customerId}&invoiceId=${inv.id}&redirect=/payments/pending`;
+  };
+
+  return (
+    <ModuleGuard moduleId="mod_invoice">
+      <div className="container-fluid py-4 min-vh-100 animate-fade-in px-4 no-print">
+        <div className="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+          <div>
+            <Breadcrumb items={[{ label: 'Outstanding Collections', active: true }]} />
+            <h2 className="fw-900 tracking-tight text-dark mb-1 mt-2">Pending Payments</h2>
+            <p className="text-muted small mb-0">Track outstanding balances and overdue collections across all industrial accounts.</p>
+          </div>
+          <div className="d-flex align-items-center gap-3">
+            <ExportExcel
+              data={pendingInvoices}
+              fileName="Pending_Payments_Report"
+              headers={{ customerName: 'Customer', invoiceNumber: 'Invoice No', grandTotal: 'Total', paidAmount: 'Paid', status: 'Status' }}
+              buttonText="Export List"
+            />
+            <button
+              className="btn btn-primary btn-page-action px-4"
+              onClick={() => (dispatch as any)(fetchInvoices({ company_id: activeCompany?.id, limit: 1000, status: 'pending', partyType }))}
+            >
+              <i className="bi bi-arrow-repeat"></i>
+              <span>Refresh Data</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Feedback Alert */}
+        {actionFeedback && (
+          <div className={`alert alert-${actionFeedback.type === 'success' ? 'success' : 'danger'} alert-dismissible fade show rounded-4 mb-3 shadow-sm d-flex align-items-center justify-content-between px-4 py-3`} role="alert">
+            <div className="d-flex align-items-center gap-2 fw-semibold">
+              <i className={`bi bi-${actionFeedback.type === 'success' ? 'check-circle-fill fs-5 text-success' : 'exclamation-triangle-fill fs-5 text-danger'}`}></i>
+              <span>{actionFeedback.message}</span>
+            </div>
+            <button type="button" className="btn-close" onClick={() => setActionFeedback(null)}></button>
+          </div>
+        )}
+
+        {/* Filter Bar */}
+        <div className="card filter-card">
+          <div className="card-body p-3">
+            <div className="filter-bar-row d-flex flex-wrap gap-2 align-items-center">
+              {/* <div className="filter-item-select" style={{ minWidth: '150px' }}>
+                <PartyTypeToggle
+                  partyType={partyType}
+                  setPartyType={setPartyType as any}
+                />
+              </div> */}
+
+              <div className="filter-item-search flex-grow-1">
+                <div className="search-group">
+                  <span className="input-group-text">
+                    <i className="bi bi-search"></i>
+                  </span>
+                  <input
+                    type="text"
+                    className="form-control search-bar"
+                    placeholder="Search customer, invoice, or PO no..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="filter-item-select">
+                <select
+                  className="form-select search-bar"
+                  value={selectedCustomerId}
+                  onChange={(e) => setSelectedCustomerId(e.target.value)}
+                >
+                  <option value="">-- All Customers --</option>
+                  {customers.map(c => (
+                    <option key={c.id} value={c.id}>{c.company || c.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="card shadow-sm border-0 overflow-hidden mt-3">
+          <div className="card-body p-0">
+            <div className="table-responsive" style={{ minHeight: '400px', paddingBottom: '80px' }}>
+              {loading ? (
+                <div className="py-2">
+                  <Loader text="Fetching Pending Payments..." />
+                </div>
+              ) : (
+                <table className="table align-middle mb-0 table-hover">
+                  <thead className="table-light">
+                    <tr>
+                      <th className="fw-bold x-small text-muted text-uppercase tracking-wider py-3 px-4 border-0">Sno</th>
+                      <SortableHeader field="customerName" label="Customer" currentSortBy={sortField} currentSortOrder={sortOrder} onSort={handleSort} className="fw-bold x-small text-muted tracking-wider py-3 border-0" />
+                      <SortableHeader field="poNo" label="Po No" currentSortBy={sortField} currentSortOrder={sortOrder} onSort={handleSort} className="fw-bold x-small text-muted tracking-wider py-3 border-0" />
+                      <SortableHeader field="dcNo" label="Dc No" currentSortBy={sortField} currentSortOrder={sortOrder} onSort={handleSort} className="fw-bold x-small text-muted tracking-wider py-3 border-0" />
+                      <SortableHeader field="invoiceNumber" label="Invoice No" currentSortBy={sortField} currentSortOrder={sortOrder} onSort={handleSort} className="fw-bold x-small text-muted tracking-wider py-3 border-0" />
+                      <SortableHeader field="date" label="Invoice Date" currentSortBy={sortField} currentSortOrder={sortOrder} onSort={handleSort} className="fw-bold x-small text-muted tracking-wider py-3 border-0" />
+                      <SortableHeader field="totalPending" label="Pending Amount" currentSortBy={sortField} currentSortOrder={sortOrder} onSort={handleSort} className="fw-bold x-small text-muted tracking-wider py-3 border-0 text-end px-3" />
+                      <SortableHeader field="overdue" label="Over Due" currentSortBy={sortField} currentSortOrder={sortOrder} onSort={handleSort} className="fw-bold x-small text-muted tracking-wider py-3 border-0 text-danger text-center" />
+                      <th className="fw-bold x-small text-muted text-uppercase tracking-wider py-3 text-center px-4 border-0">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="border-top-0">
+                    {paginatedGroups.map((group, index) => {
+                      const maxOverdueDays = Math.max(0, ...group.invoices.map(inv => calculateOverdueDays(inv.dueDate)));
+
+                      const latestInvoice = group.invoices.reduce((latest, current) => {
+                        const latestDate = latest.date ? new Date(latest.date).getTime() : 0;
+                        const currentDate = current.date ? new Date(current.date).getTime() : 0;
+                        return currentDate > latestDate ? current : latest;
+                      }, group.invoices[0]);
+
+                      return (
+                        <tr
+                          key={group.customerId}
+                          className="border-bottom border-light"
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => router.push(getVoucherUrl(group.firstInvoice))}
+                        >
+                          <td className="text-muted small px-4">
+                            {(pagination.currentPage - 1) * pagination.itemsPerPage + index + 1}
+                          </td>
+                          <td className="text-dark fw-bold text-uppercase" style={{ fontSize: '0.85rem' }}>
+                            <div className="d-flex flex-column align-items-start gap-1">
+                              <span style={{ lineHeight: '1.4' }}>{group.customerName}</span>
+                              {group.invoices.length > 1 && (
+                                <span className="badge bg-secondary rounded-pill" style={{ fontSize: '0.7rem' }}>{group.invoices.length} Invoices</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="text-muted small">{latestInvoice.poNo || '-'}</td>
+                          <td className="text-muted small">{latestInvoice.dcNo || '-'}</td>
+                          <td className="text-dark fw-bold small">
+                            <Link
+                              href={`/invoices/${latestInvoice.id}`}
+                              className="text-primary fw-bold text-decoration-none hover-underline"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {latestInvoice.invoiceNumber}
+                            </Link>
+                          </td>
+                          <td className="text-muted small">{latestInvoice.date ? new Date(latestInvoice.date).toLocaleDateString() : 'N/A'}</td>
+                          <td className="text-dark fw-bold small text-end px-3">₹ {group.totalPending.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                          <td className="text-center">
+                            {maxOverdueDays > 0 ? (
+                              <span className="badge rounded-pill bg-danger-subtle text-danger px-3">{maxOverdueDays} Days</span>
+                            ) : (
+                              <span className="badge rounded-pill bg-success-subtle text-success px-3">On Time</span>
+                            )}
+                          </td>
+                          <td className="text-center px-4 text-nowrap" onClick={(e) => e.stopPropagation()}>
+                            <div className="d-flex justify-content-center gap-2">
+                              <button
+                                className="btn border-0 d-flex align-items-center justify-content-center p-0 shadow-sm"
+                                title="Create Payment Voucher"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  router.push(getVoucherUrl(group.firstInvoice));
+                                }}
+                                style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#0ea5e9', color: '#fff' }}
+                              >
+                                <i className="bi bi-pencil-fill fs-6"></i>
+                              </button>
+
+                              <button
+                                className="btn border-0 d-flex align-items-center justify-content-center p-0 shadow-sm"
+                                title="Print Statement"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handlePrintPending(group);
+                                }}
+                                style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#10b981', color: '#fff' }}
+                              >
+                                <i className="bi bi-printer-fill fs-6"></i>
+                              </button>
+
+                              <button
+                                className="btn border-0 d-flex align-items-center justify-content-center p-0 shadow-sm"
+                                title="Send Email Reminder"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (group.invoices.length === 1) {
+                                    setReminderInvoice(group.invoices[0]);
+                                  } else {
+                                    setInvoiceSelectGroup(group);
+                                  }
+                                }}
+                                style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#f59e0b', color: '#fff' }}
+                              >
+                                <i className="bi bi-bell-fill fs-6"></i>
+                              </button>
+                              <button
+                                className="btn border-0 d-flex align-items-center justify-content-center p-0 shadow-sm"
+                                title="Close / Settle Invoice"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (group.invoices.length === 1) {
+                                    const targetInv = group.invoices[0];
+                                    if (confirm(`Do you want to mark Invoice #${targetInv.invoiceNumber} as Closed/Settled? It will be removed from Pending Payments.`)) {
+                                      handleToggleClose(targetInv);
+                                    }
+                                  } else {
+                                    setCloseModalGroup(group);
+                                  }
+                                }}
+                                style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#6366f1', color: '#fff' }}
+                              >
+                                <i className="bi bi-check2-circle fs-6"></i>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {customerGroups.length === 0 && (
+                      <tr>
+                        <td colSpan={9} className="text-center py-5 text-muted">
+                          <h6 className="fw-normal">No pending payments found</h6>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {totalPages > 1 && (
+              <div className="p-3 border-top bg-light d-flex justify-content-between align-items-center px-4">
+                <span className="text-muted small">Showing {(pagination.currentPage - 1) * pagination.itemsPerPage + 1} to {Math.min(pagination.currentPage * pagination.itemsPerPage, customerGroups.length)} of {customerGroups.length} entries</span>
+                <PaginationComponent
+                  currentPage={pagination.currentPage}
+                  totalPages={totalPages}
+                  onPageChange={(page) => dispatch(setInvoicePage(page))}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Print Statement Area */}
+      {printGroup && (
+        <div className="print-area d-none">
+          <IndustrialDocument
+            type="statement"
+            company={activeCompany}
+            data={{
+              partyName: printGroup.customerName,
+              partyType: 'customer',
+              customerId: printGroup.customerId,
+              vendorId: printGroup.customerId,
+              date: new Date().toISOString(),
+              totalPending: printGroup.totalPending,
+              items: printGroup.invoices,
+            }}
+          />
+        </div>
+      )}
+
+      {/* Invoice Selector Modal (when customer has multiple pending invoices) */}
+      {invoiceSelectGroup && (
+        <div
+          className="modal fade show d-block"
+          tabIndex={-1}
+          style={{ backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1060 }}
+          onClick={() => setInvoiceSelectGroup(null)}
+        >
+          <div
+            className="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-content shadow border-0 rounded-4 overflow-hidden">
+              <div className="modal-header border-bottom px-4 py-3 bg-light">
+                <div>
+                  <h5 className="modal-title fw-bold text-dark d-flex align-items-center gap-2 mb-0">
+                    <i className="bi bi-bell-fill text-warning"></i>
+                    Send Email Reminder
+                  </h5>
+                  <div className="text-muted small mt-1">
+                    Select an invoice for <strong className="text-dark">{invoiceSelectGroup.customerName}</strong>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn-close"
+                  onClick={() => setInvoiceSelectGroup(null)}
+                ></button>
+              </div>
+              <div className="modal-body p-0" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                <div className="table-responsive">
+                  <table className="table align-middle mb-0 table-hover">
+                    <thead className="table-light">
+                      <tr>
+                        <th className="x-small text-muted text-uppercase fw-bold px-4 py-2 border-0">Invoice No</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0">Date</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0">Total</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0 text-end">Pending</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0 text-center">Status</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0 text-end px-4">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invoiceSelectGroup.invoices.map((inv: any) => {
+                        const pendingBal = (inv.grandTotal || 0) - (inv.paidAmount || 0);
+                        const overdue = calculateOverdueDays(inv.dueDate);
+                        return (
+                          <tr key={inv.id}>
+                            <td className="px-4 fw-bold text-primary">
+                              {inv.invoiceNumber}
+                            </td>
+                            <td className="small text-muted">
+                              {inv.date ? new Date(inv.date).toLocaleDateString() : 'N/A'}
+                            </td>
+                            <td className="small text-muted">
+                              ₹ {(inv.grandTotal || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                            </td>
+                            <td className="small fw-bold text-danger text-end">
+                              ₹ {pendingBal.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                            </td>
+                            <td className="text-center">
+                              {overdue > 0 ? (
+                                <span className="badge rounded-pill bg-danger-subtle text-danger px-2" style={{ fontSize: '0.7rem' }}>
+                                  {overdue}d Overdue
+                                </span>
+                              ) : (
+                                <span className="badge rounded-pill bg-success-subtle text-success px-2" style={{ fontSize: '0.7rem' }}>
+                                  On Time
+                                </span>
+                              )}
+                            </td>
+                            <td className="text-end px-4">
+                              <div className="d-flex align-items-center justify-content-end gap-2">
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-warning text-dark fw-bold rounded-pill px-3 d-inline-flex align-items-center gap-1 shadow-sm"
+                                  onClick={() => {
+                                    const selectedInv = inv;
+                                    setInvoiceSelectGroup(null);
+                                    setReminderInvoice(selectedInv);
+                                  }}
+                                >
+                                  <i className="bi bi-bell-fill"></i>
+                                  Send Reminder
+                                </button>
+
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-outline-secondary rounded-pill px-3 d-inline-flex align-items-center gap-1 shadow-sm"
+                                  title="Mark this invoice as Closed"
+                                  disabled={closingInvoiceId === String(inv.id)}
+                                  onClick={() => {
+                                    if (confirm(`Mark Invoice #${inv.invoiceNumber} as Closed?`)) {
+                                      handleToggleClose(inv);
+                                    }
+                                  }}
+                                >
+                                  <i className="bi bi-check2-circle text-success"></i>
+                                  {closingInvoiceId === String(inv.id) ? 'Closing...' : 'Close'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="modal-footer border-top px-4 py-2 bg-light">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary rounded-pill px-3"
+                  onClick={() => setInvoiceSelectGroup(null)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Invoice Email Reminder Modal */}
+      {reminderInvoice && (
+        <InvoiceEmailReminderToggle
+          invoice={reminderInvoice}
+          modalOnly={true}
+          autoOpenSend={true}
+          onClose={() => setReminderInvoice(null)}
+        />
+      )}
+
+      {/* Close Invoices Modal (when customer has multiple pending invoices) */}
+      {closeModalGroup && (
+        <div
+          className="modal fade show d-block"
+          tabIndex={-1}
+          style={{ backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1060 }}
+          onClick={() => setCloseModalGroup(null)}
+        >
+          <div
+            className="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-content shadow border-0 rounded-4 overflow-hidden">
+              <div className="modal-header border-bottom px-4 py-3 bg-light">
+                <div>
+                  <h5 className="modal-title fw-bold text-dark d-flex align-items-center gap-2 mb-0">
+                    <i className="bi bi-check2-circle text-primary"></i>
+                    Close / Settle Invoice
+                  </h5>
+                  <div className="text-muted small mt-1">
+                    Select an invoice to mark as closed for <strong className="text-dark">{closeModalGroup.customerName}</strong>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn-close"
+                  onClick={() => setCloseModalGroup(null)}
+                ></button>
+              </div>
+              <div className="modal-body p-0" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                <div className="table-responsive">
+                  <table className="table align-middle mb-0 table-hover">
+                    <thead className="table-light">
+                      <tr>
+                        <th className="x-small text-muted text-uppercase fw-bold px-4 py-2 border-0">Invoice No</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0">Date</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0">Total</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0 text-end">Pending</th>
+                        <th className="x-small text-muted text-uppercase fw-bold py-2 border-0 text-end px-4">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {closeModalGroup.invoices.map((inv: any) => {
+                        const pendingBal = (inv.grandTotal || 0) - (inv.paidAmount || 0);
+                        return (
+                          <tr key={inv.id}>
+                            <td className="px-4 fw-bold text-primary">{inv.invoiceNumber}</td>
+                            <td className="small text-muted">{inv.date ? new Date(inv.date).toLocaleDateString() : 'N/A'}</td>
+                            <td className="small text-muted">₹ {(inv.grandTotal || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="small fw-bold text-danger text-end">₹ {pendingBal.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="text-end px-4">
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-dark rounded-pill px-3 d-inline-flex align-items-center gap-1 shadow-sm"
+                                disabled={closingInvoiceId === String(inv.id)}
+                                onClick={() => {
+                                  if (confirm(`Do you want to mark Invoice #${inv.invoiceNumber} as Closed? It will be removed from Pending Payments.`)) {
+                                    handleToggleClose(inv);
+                                  }
+                                }}
+                              >
+                                <i className="bi bi-check2-circle text-success"></i>
+                                {closingInvoiceId === String(inv.id) ? 'Closing...' : 'Close Invoice'}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="modal-footer border-top px-4 py-2 bg-light">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary rounded-pill px-3"
+                  onClick={() => setCloseModalGroup(null)}
+                >
+                  Close Window
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style jsx>{`
+        .fw-900 { font-weight: 900; }
+        .tracking-tight { letter-spacing: -0.025em; }
+        .x-small { font-size: 0.75rem !important; }
+        .table-responsive {
+          min-height: 400px;
+          padding-bottom: 80px;
+        }
+        
+        @media print {
+          .no-print { display: none !important; }
+          .print-area { display: block !important; }
+          .d-none { display: block !important; }
+          body, html { 
+            background: white !important; 
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+        }
+      `}</style>
+    </ModuleGuard>
+  );
+};
+
+export default PendingPaymentPage;

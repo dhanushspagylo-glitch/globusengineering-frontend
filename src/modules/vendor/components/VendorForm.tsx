@@ -1,0 +1,421 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { RootState } from '@/redux/store';
+import { useRouter } from 'next/navigation';
+import { createVendor, updateVendor } from '@/redux/features/vendorSlice';
+import { fetchCompanies } from '@/redux/features/companySlice';
+import { Vendor } from '@/types/modules';
+import FullPageStatus from '@/components/FullPageStatus';
+import StateSelect from '@/components/shared/StateSelect';
+
+
+interface VendorFormProps {
+  initialData?: Vendor;
+  mode: 'create' | 'edit' | 'view';
+}
+
+const VendorForm: React.FC<VendorFormProps> = ({ initialData, mode }) => {
+  const dispatch = useDispatch();
+  const router = useRouter();
+  const { user, company: activeCompany } = useSelector((state: RootState) => state.auth);
+  const { items: companies } = useSelector((state: RootState) => state.companies);
+  const [formData, setFormData] = useState({
+    vendorType: 'New',
+    name: '',
+    company: '',
+    email: '',
+    phone: '',
+    category: 'Raw Materials',
+    status: 'pending' as Vendor['status'],
+    company_id: (user?.role === 'super_admin' && activeCompany) ? activeCompany.id : (user?.company_id || ''),
+    street1: '',
+    street2: '',
+    city: '',
+    area: '',
+    state: '',
+    stateCode: '',
+    pinCode: '',
+    contactPerson1: '',
+    designation1: '',
+    emailId1: '',
+    phoneNumber1: '',
+    contactPerson2: '',
+    designation2: '',
+    emailId2: '',
+    phoneNumber2: '',
+    contactPerson3: '',
+    designation3: '',
+    emailId3: '',
+    phoneNumber3: '',
+    landline: '',
+    fax: '',
+    gst: '',
+    tin: '',
+    cst: '',
+    paymentTerms: ''
+  });
+
+  const [modal, setModal] = useState<{
+    isOpen: boolean;
+    type: 'success' | 'error';
+    title: string;
+    message: string;
+  }>({ isOpen: false, type: 'success', title: '', message: '' });
+
+
+  useEffect(() => {
+    if (user?.role === 'super_admin') {
+      (dispatch as any)(fetchCompanies());
+    }
+  }, [dispatch, user]);
+
+  useEffect(() => {
+    // If Super Admin switches company, update the form
+    if (user?.role === 'super_admin' && activeCompany && mode === 'create' && !formData.name) {
+      setFormData(prev => ({ ...prev, company_id: activeCompany.id }));
+    }
+  }, [activeCompany, user?.role, mode]);
+
+  useEffect(() => {
+    if (initialData) {
+      setFormData({
+        vendorType: initialData.vendorType || 'New',
+        name: initialData.name || '',
+        company: initialData.company || '',
+        email: initialData.email || '',
+        phone: initialData.phone || '',
+        category: initialData.category || 'Raw Materials',
+        status: initialData.status || 'pending',
+        company_id: initialData.company_id || '',
+        street1: initialData.street1 || '',
+        street2: initialData.street2 || '',
+        city: initialData.city || '',
+        area: initialData.area || '',
+        state: initialData.state || '',
+        stateCode: initialData.stateCode || '',
+        pinCode: initialData.pinCode || '',
+        contactPerson1: initialData.contactPerson1 || '',
+        designation1: initialData.designation1 || '',
+        emailId1: initialData.emailId1 || '',
+        phoneNumber1: initialData.phoneNumber1 || '',
+        contactPerson2: initialData.contactPerson2 || '',
+        designation2: initialData.designation2 || '',
+        emailId2: initialData.emailId2 || '',
+        phoneNumber2: initialData.phoneNumber2 || '',
+        contactPerson3: initialData.contactPerson3 || '',
+        designation3: initialData.designation3 || '',
+        emailId3: initialData.emailId3 || '',
+        phoneNumber3: initialData.phoneNumber3 || '',
+        landline: initialData.landline || '',
+        fax: initialData.fax || '',
+        gst: initialData.gst || '',
+        tin: initialData.tin || '',
+        cst: initialData.cst || '',
+        paymentTerms: initialData.paymentTerms || ''
+      });
+    }
+  }, [initialData]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!formData.name && !formData.company) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Vendor Name Required',
+        message: 'Please enter the Vendor Name or Company Name.'
+      });
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      const finalData = { ...formData };
+      
+      // If user is a staff/admin with a fixed company, ensure it's set
+      if (!finalData.company_id && user?.company_id) {
+        finalData.company_id = user.company_id;
+      }
+
+      if (mode === 'create') {
+        const resultAction = await (dispatch as any)(createVendor(finalData as any));
+        if (createVendor.fulfilled.match(resultAction)) {
+          setModal({
+            isOpen: true,
+            type: 'success',
+            title: 'Success!',
+            message: "Vendor profile registered successfully."
+          });
+        }
+      } else if (mode === 'edit' && initialData) {
+        const resultAction = await (dispatch as any)(updateVendor({ ...initialData, ...finalData } as any));
+        if (updateVendor.fulfilled.match(resultAction)) {
+          setModal({
+            isOpen: true,
+            type: 'success',
+            title: 'Success!',
+            message: "Vendor profile updated successfully."
+          });
+        }
+      }
+
+
+    } catch (err: any) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Error',
+        message: err.message || 'Failed to save vendor profile.'
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const fillMockData = () => {
+    setFormData(prev => ({
+      ...prev,
+      vendorType: 'Regular',
+      name: 'Sample Tools Pvt Ltd',
+      company: 'Sample Tools Pvt Ltd',
+      email: 'contact@sampletools.com',
+      phone: '+91 8877665544',
+      category: 'Machinery',
+      status: 'active',
+      street1: '12 Industrial Estate',
+      street2: 'Block A, Sector 4',
+      city: 'Coimbatore',
+      area: 'Peelamedu',
+      state: 'Tamil Nadu',
+      stateCode: '33',
+      pinCode: '641004',
+      contactPerson1: 'Sathish Kumar',
+      designation1: 'Operations Manager',
+      emailId1: 'sathish@sampletools.com',
+      phoneNumber1: '+91 9988112233',
+      contactPerson2: 'Meena Reddy',
+      designation2: 'Accounts Head',
+      emailId2: 'meena@sampletools.com',
+      phoneNumber2: '+91 9988112244',
+      contactPerson3: 'Vijay',
+      designation3: 'Dispatch Coordinator',
+      emailId3: 'dispatch@sampletools.com',
+      phoneNumber3: '+91 9988112255',
+      landline: '0422-2567890',
+      fax: '0422-2567891',
+      gst: '33AAABC1234D1Z2',
+      tin: 'TIN-33-8822',
+      cst: 'CST-33-9911',
+      paymentTerms: 'Net 30 Days',
+      // Respect current selection for Super Admin
+      company_id: prev.company_id || user?.company_id || ''
+    }));
+  };
+
+  const renderInput = (label: string, name: keyof typeof formData, type = 'text', required = false) => (
+    <div className="col-md-6 mb-3">
+      <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">
+        {label}
+      </label>
+
+      <input
+        type={type}
+        className="form-control"
+        name={name}
+        value={formData[name]}
+        onChange={handleChange}
+        placeholder={label}
+        
+        disabled={mode === 'view'}
+      />
+    </div>
+  );
+
+  return (
+
+    <div className="card border-0 shadow-sm">
+      <div className="card-body p-4">
+        <form onSubmit={handleSubmit}>
+          
+          <div className="d-flex justify-content-between align-items-center mb-4 border-bottom pb-2">
+            <h5 className="text-primary mb-0 fw-bold" style={{ fontSize: '1rem' }}>BASIC DETAILS</h5>
+          </div>
+          <div className="row g-3 mb-4">
+            {user?.role === 'super_admin' && (
+              <div className="col-md-12 mb-3">
+                 <div className="p-3 bg-light rounded border border-warning shadow-sm">
+                    <label className="form-label fw-bold text-dark x-small text-uppercase mb-2 d-block">Associate with Company (System-Level Permission)</label>
+                    <select 
+                      className="form-select border-primary fw-bold" 
+                      name="company_id" 
+                      value={formData.company_id} 
+                      onChange={handleChange}
+                     
+                      disabled={mode === 'view'}
+                    >
+                      <option value="">-- Choose Company --</option>
+                      {companies.map(comp => (
+                        <option key={comp.id} value={comp.id}>{comp.name}</option>
+                      ))}
+                    </select>
+                    <small className="text-muted mt-2 d-block" style={{ fontSize: '0.75rem' }}>You are adding this vendor to <strong>{companies.find(c => c.id === formData.company_id)?.name || 'the selected company'}</strong> as a Super Admin.</small>
+                 </div>
+              </div>
+            )}
+            <div className="col-md-6 mb-3">
+              <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">Vendor Type</label>
+              <select className="form-select" name="vendorType" value={formData.vendorType} onChange={handleChange} disabled={mode === 'view'}>
+                <option value="New">New</option>
+                <option value="Regular">Regular</option>
+                <option value="Contractor">Contractor</option>
+              </select>
+            </div>
+            {renderInput('Vendor Name', 'name', 'text', true)}
+            {renderInput('Company Name', 'company', 'text', true)}
+            {renderInput('Email Address', 'email', 'text', true)}
+            {renderInput('Phone Number', 'phone', 'text', true)}
+
+            
+            <div className="col-md-6 mb-3">
+              <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">Category</label>
+              <select className="form-select" name="category" value={formData.category} onChange={handleChange} disabled={mode === 'view'}>
+                <option value="Raw Materials">Raw Materials</option>
+                <option value="Logistics">Logistics</option>
+                <option value="Machinery">Machinery</option>
+                <option value="Electrical">Electrical</option>
+                <option value="Services">Services</option>
+              </select>
+            </div>
+            <div className="col-md-6 mb-3">
+              <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">Status</label>
+              <select className="form-select" name="status" value={formData.status} onChange={handleChange} disabled={mode === 'view'}>
+                <option value="active">Active</option>
+                <option value="pending">Pending</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </div>
+          </div>
+
+          <h5 className="mb-4 text-primary border-bottom pb-2 fw-bold" style={{ fontSize: '1rem' }}>ADDRESS DETAILS</h5>
+          <div className="row g-3 mb-4">
+            {renderInput('Street 1', 'street1', 'text', true)}
+            {renderInput('Street 2', 'street2')}
+            {renderInput('City', 'city', 'text', true)}
+            {renderInput('Area', 'area')}
+            <div className="col-md-6 mb-3">
+              <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">State</label>
+              <StateSelect
+                value={formData.state}
+                onChange={(name, code) => setFormData(prev => ({ ...prev, state: name, stateCode: code }))}
+                disabled={mode === 'view'}
+              />
+            </div>
+            <div className="col-md-6 mb-3">
+              <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">State Code</label>
+              <input
+                type="text"
+                className="form-control bg-light"
+                value={formData.stateCode}
+                readOnly
+                placeholder="Auto-filled"
+                style={{ cursor: 'not-allowed' }}
+              />
+            </div>
+            {renderInput('Pin code', 'pinCode', 'text', true)}
+          </div>
+
+
+          <h5 className="mb-4 text-primary border-bottom pb-2 fw-bold" style={{ fontSize: '1rem' }}>CONTACT PERSONS</h5>
+          <div className="row g-3 mb-4">
+            {renderInput('Contact Person 1', 'contactPerson1', 'text', true)}
+            {renderInput('Designation 1', 'designation1', 'text', true)}
+            {renderInput('Email Id 1', 'emailId1', 'email', true)}
+            {renderInput('Phone Number 1', 'phoneNumber1', 'text', true)}
+            
+            {renderInput('Contact Person 2', 'contactPerson2')}
+            {renderInput('Designation 2', 'designation2')}
+            {renderInput('Email Id 2', 'emailId2', 'text')}
+            {renderInput('Phone Number 2', 'phoneNumber2')}
+            
+            {renderInput('Contact Person 3', 'contactPerson3')}
+            {renderInput('Designation 3', 'designation3')}
+            {renderInput('Email Id 3', 'emailId3', 'text')}
+            {renderInput('Phone Number 3', 'phoneNumber3')}
+            
+            {renderInput('Landline', 'landline')}
+            {renderInput('Fax', 'fax')}
+          </div>
+
+          <h5 className="mb-4 text-primary border-bottom pb-2 fw-bold" style={{ fontSize: '1rem' }}>TAX & PAYMENT DETAILS</h5>
+          <div className="row g-3 mb-4">
+            {renderInput('GST', 'gst', 'text', true)}
+            {renderInput('TIN', 'tin', 'text', true)}
+            {renderInput('CST', 'cst', 'text', true)}
+            {renderInput('Payment Terms', 'paymentTerms', 'text', true)}
+          </div>
+
+
+          {mode !== 'view' && (
+            <div className="mt-5 pt-4 border-top d-flex gap-3">
+              <button 
+                type="submit" 
+                className="btn btn-primary px-4 fw-bold rounded-pill shadow-accent d-flex align-items-center gap-2"
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? (
+                  <>
+                    <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                    <span>{mode === 'create' ? 'Registering...' : 'Updating...'}</span>
+                  </>
+                ) : (
+                  mode === 'create' ? 'Register Vendor' : 'Update Vendor'
+                )}
+              </button>
+              <button 
+                type="button" 
+                className="btn btn-outline-secondary px-4 fw-bold rounded-pill"
+                onClick={() => router.push('/vendors')}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          {modal.isOpen && (
+            <FullPageStatus
+              type={modal.type}
+              title={modal.title}
+              message={modal.message}
+              onClose={() => {
+                setModal(prev => ({ ...prev, isOpen: false }));
+                if (modal.type === 'success') router.push('/vendors');
+              }}
+            />
+          )}
+        </form>
+      </div>
+      <style jsx>{`
+        .form-control, .form-select {
+          height: 38px !important;
+          font-size: 0.85rem !important;
+        }
+        .x-small {
+           font-size: 0.75rem !important;
+        }
+      `}</style>
+    </div>
+  );
+};
+
+export default VendorForm;

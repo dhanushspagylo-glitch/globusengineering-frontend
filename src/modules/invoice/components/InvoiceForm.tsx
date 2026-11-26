@@ -1,0 +1,1906 @@
+'use client';
+
+import React, { useState, useEffect, useRef } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { RootState } from '@/redux/store';
+import api from '@/lib/axios';
+import { addInvoice, updateInvoice } from '@/redux/features/invoiceSlice';
+import { fetchItems, fetchProcesses, fetchPriceFixings, updatePriceFixingThunk, createPriceFixingThunk } from '@/redux/features/masterSlice';
+import { fetchInwards } from '@/redux/features/inwardSlice';
+import { fetchCustomers } from '@/redux/features/customerSlice';
+import { fetchVendors } from '@/redux/features/vendorSlice';
+import { Invoice } from '@/types/modules';
+import BackButton from '@/components/BackButton';
+import FullPageStatus from '@/components/FullPageStatus';
+import SearchableSelect from '@/components/shared/SearchableSelect';
+import PageModeIndicator from '@/components/PageModeIndicator';
+
+
+interface InvoiceFormProps {
+   initialData?: Invoice;
+   mode: 'create' | 'edit';
+}
+
+const InvoiceForm: React.FC<InvoiceFormProps> = ({ initialData, mode }) => {
+   const dispatch = useDispatch();
+   const router = useRouter();
+   const searchParams = useSearchParams();
+   const inwardId = searchParams.get('inwardId');
+
+   const { company, token: authToken } = useSelector((state: RootState) => state.auth);
+   const { items: customers, loading: customersLoading } = useSelector((state: RootState) => state.customers);
+   const { items: vendors, loading: vendorsLoading } = useSelector((state: RootState) => state.vendors);
+   const { items: inwards, loading: inwardsLoading } = useSelector((state: RootState) => state.inward);
+   const { settings } = useSelector((state: RootState) => state.invoices);
+   const { items: masterItems, processes: masterProcesses, priceFixings, loading: masterLoading } = useSelector((state: RootState) => state.master);
+
+   const typeParam = searchParams.get('type');
+   const defaultBillType = typeParam === 'wp' ? 'With Process' : typeParam === 'wop' ? 'Without Process' : typeParam === 'both' ? 'Both' : 'With Process';
+
+   const [formData, setFormData] = useState<any>({
+      invoiceNumber: settings.nextInvoice || '',
+      challanNumber: settings.nextChallan || '',
+      customerId: '',
+      customerName: '',
+      company_id: company?.id || '',
+      date: new Date().toISOString().split('T')[0],
+      dueDate: '',
+      type: 'INVOICE',
+      billType: defaultBillType,
+      inwardId: inwardId || undefined,
+      status: 'draft',
+      poNo: '',
+      po_no: '',
+      poDate: '',
+      po_date: '',
+      dcNo: '',
+      dc_no: '',
+      dcDate: '',
+      dc_date: '',
+      address: '',
+      shippingName: '',
+      shippingAddress: '',
+      shippingState: '',
+      shippingGstin: '',
+      gstin: '',
+      state: '',
+      stateCode: '',
+      items: [{ id: '1', description: '', process: '', quantity: 1, wopQty: 0, unitPrice: 0, tax: 0, amount: 0, total: 0 }],
+      subTotal: 0,
+      taxTotal: 0,
+      discount: 0,
+      otherCharges: 0,
+      otherChargesDesc: '',
+      taxRate: 18,
+      grandTotal: 0,
+      paidAmount: 0,
+      notes: '',
+   });
+
+   const [pendingInwards, setPendingInwards] = useState<any[]>([]);
+   const [inwardLoading, setInwardLoading] = useState(false);
+
+   const [selectionMode, setSelectionMode] = useState<'CUSTOMER' | 'GSTN'>('CUSTOMER');
+
+
+   const [gstLoading, setGstLoading] = useState(false);
+   const [gstError, setGstError] = useState<string | null>(null);
+
+   const [modal, setModal] = useState<{ isOpen: boolean; type: 'success' | 'error'; title: string; message: string }>({
+      isOpen: false,
+      type: 'success',
+      title: '',
+      message: ''
+   });
+
+   const [loading, setLoading] = useState(false);
+
+   const [isComponentMounted, setIsComponentMounted] = useState(false);
+   const [sequenceLoading, setSequenceLoading] = useState(false);
+   const [inwardInitLoading, setInwardInitLoading] = useState(!!inwardId);
+   const editInitializedRef = useRef<string | null>(null);
+   const inwardPopulatedRef = useRef<string | null>(null);
+
+
+
+   useEffect(() => {
+      if (company?.id) {
+         (dispatch as any)(fetchItems({ company_id: company.id, limit: 1000 }));
+         (dispatch as any)(fetchProcesses({ company_id: company.id, limit: 1000 }));
+         (dispatch as any)(fetchPriceFixings({ company_id: company.id, limit: 10000 }));
+         (dispatch as any)(fetchCustomers({ company_id: company.id, limit: 1000 }));
+         (dispatch as any)(fetchVendors({ company_id: company.id, limit: 1000 }));
+
+         if (mode === 'create') {
+            (dispatch as any)(fetchInwards({ company_id: company.id, status: 'all', limit: 1000 }));
+            setSequenceLoading(true);
+            import('@/redux/features/invoiceSlice').then(async ({ fetchNextNumbers }) => {
+               try {
+                  const data = await (dispatch as any)(fetchNextNumbers({ companyId: company.id })).unwrap();
+                  setFormData((prev: any) => ({
+                     ...prev,
+                     invoiceNumber: prev.invoiceNumber || String(data.nextInvoice || data.nextInvoiceNo || '').padStart(4, '0'),
+                     challanNumber: prev.challanNumber || String(data.nextChallan || data.nextDeliveryNo || '').padStart(4, '0')
+                  }));
+               } catch (err) {
+                  // console.error('Failed to pre-fetch next sequence numbers:', err);
+               } finally {
+                  setSequenceLoading(false);
+               }
+            });
+         }
+      } else {
+         (dispatch as any)(fetchCustomers({}));
+      }
+      setIsComponentMounted(true);
+   }, [dispatch, company?.id, mode]);
+
+   useEffect(() => {
+      if (company?.id && !formData.company_id) {
+         setFormData((prev: any) => ({ ...prev, company_id: company.id }));
+      }
+   }, [company?.id, formData.company_id]);
+
+   const findPrice = (compId: string, custId: string, itemName: string, procName: string) => {
+      if (!custId || !itemName) return null;
+
+      const cleanItem = String(itemName).toLowerCase().trim();
+      const cleanProc = procName ? String(procName).toLowerCase().trim() : '';
+
+      const pf = priceFixings.find(pf => {
+         if (compId && pf.company_id && String(pf.company_id).toLowerCase() !== String(compId).toLowerCase()) {
+            return false;
+         }
+         const matchCust = String(pf.customerId) === String(custId);
+         const matchItem = String(pf.itemName || '').toLowerCase().trim() === cleanItem;
+         const pfProc = String(pf.processName || '').toLowerCase().trim();
+         const matchProc = cleanProc ? pfProc === cleanProc : true;
+
+         return matchCust && matchItem && matchProc;
+      });
+
+      return pf || null;
+   };
+
+   useEffect(() => {
+      if (mode === 'create' && !formData.invoiceNumber && settings.nextInvoice) {
+         setFormData((prev: any) => ({
+            ...prev,
+            invoiceNumber: settings.nextInvoice,
+            challanNumber: settings.nextChallan,
+         }));
+      }
+   }, [settings.nextInvoice, settings.nextChallan, mode, formData.invoiceNumber]);
+
+   useEffect(() => {
+      if (initialData) {
+         if (mode === 'edit' && editInitializedRef.current === String(initialData.id)) {
+            return;
+         }
+         if (mode === 'edit') {
+            editInitializedRef.current = String(initialData.id);
+         }
+         const cleanVal = (val: any): string => {
+            if (val === null || val === undefined) return '';
+            const s = String(val).trim();
+            return s.toLowerCase() === 'null' ? '' : s;
+         };
+         const cid = String(initialData.customerId || '').trim();
+         const matchedParty = cid
+            ? (customers.find(c => String(c.id) === cid) || vendors.find(v => String(v.id) === cid))
+            : undefined;
+         const livePartyAddress = matchedParty ? [
+            cleanVal((matchedParty as any).street1 || (matchedParty as any).address),
+            cleanVal((matchedParty as any).street2),
+            cleanVal((matchedParty as any).city),
+            cleanVal((matchedParty as any).state),
+            cleanVal((matchedParty as any).pinCode ?? (matchedParty as any).pin_code)
+         ].filter(Boolean).join(', ') : '';
+
+         const resolvedCustomerName = cleanVal(matchedParty?.name || (matchedParty as any)?.company) || cleanVal(initialData.customerName);
+         const resolvedAddress = livePartyAddress || cleanVal(initialData.address);
+         const resolvedState = matchedParty ? (cleanVal(matchedParty.state) || cleanVal((initialData as any).state)) : cleanVal((initialData as any).state);
+         const resolvedStateCode = matchedParty
+            ? cleanVal(matchedParty.stateCode ?? (matchedParty as any).state_code)
+            : cleanVal((initialData as any).stateCode || (initialData as any).state_code);
+         const resolvedGstin = matchedParty ? (cleanVal(matchedParty.gst || (matchedParty as any).gstin) || cleanVal(initialData.gstin)) : cleanVal(initialData.gstin);
+
+         const initNameLower = cleanVal(initialData.customerName).toLowerCase();
+         const initAddrLower = cleanVal(initialData.address).toLowerCase();
+         const initStateLower = cleanVal((initialData as any).state).toLowerCase();
+         const initGstLower = cleanVal(initialData.gstin).toLowerCase();
+
+         const resolvedShippingName = initialData.shippingName && cleanVal(initialData.shippingName).toLowerCase() === initNameLower
+            ? resolvedCustomerName
+            : (initialData.shippingName || '');
+         const resolvedShippingAddress = initialData.shippingAddress && cleanVal(initialData.shippingAddress).toLowerCase() === initAddrLower
+            ? resolvedAddress
+            : (initialData.shippingAddress || '');
+         const resolvedShippingState = initialData.shippingState && cleanVal(initialData.shippingState).toLowerCase() === initStateLower
+            ? resolvedState
+            : (initialData.shippingState || '');
+         const resolvedShippingGstin = initialData.shippingGstin && cleanVal(initialData.shippingGstin).toLowerCase() === initGstLower
+            ? resolvedGstin
+            : (initialData.shippingGstin || '');
+
+         const mappedData = {
+            ...initialData,
+            customerId: cid,
+            customerName: resolvedCustomerName,
+            address: resolvedAddress,
+            gstin: resolvedGstin,
+            shippingName: resolvedShippingName,
+            shippingAddress: resolvedShippingAddress,
+            shippingState: resolvedShippingState,
+            shippingGstin: resolvedShippingGstin,
+            invoiceNumber: initialData.invoiceNumber || (initialData as any).invoice_no,
+            date: initialData.date || (initialData as any).invoice_date,
+            billType: (initialData.billType || (initialData as any).bill_type || initialData.type || 'with_process').toLowerCase().includes('without') ||
+               (initialData.billType || (initialData as any).bill_type || initialData.type) === 'WOP' ? 'Without Process' :
+               (initialData.billType || (initialData as any).bill_type || initialData.type || '').toLowerCase() === 'both' ? 'Both' : 'With Process',
+            poNo: (initialData as any).po_no || initialData.poNo || '',
+            po_no: (initialData as any).po_no || initialData.poNo || '',
+            dcNo: (initialData as any).dc_no || initialData.dcNo || '',
+            dc_no: (initialData as any).dc_no || initialData.dcNo || '',
+            poDate: initialData.poDate || (initialData as any).po_date || '',
+            po_date: initialData.poDate || (initialData as any).po_date || '',
+            dcDate: initialData.dcDate || (initialData as any).dc_date || '',
+            dc_date: initialData.dcDate || (initialData as any).dc_date || '',
+            state: resolvedState,
+            stateCode: resolvedStateCode,
+            challanNumber: initialData.challanNumber || (initialData as any).delivery_no || (initialData as any).challanNumber || '',
+            otherCharges: initialData.otherCharges || (initialData as any).other_charges || 0,
+            otherChargesDesc: initialData.otherChargesDesc || (initialData as any).other_charges_desc || '',
+            taxRate: (Number(initialData.taxRate) === 12 || Number((initialData as any).tax_rate) === 12) ? 18 : (initialData.taxRate || (initialData as any).tax_rate || 18),
+            discount: initialData.discount || 0,
+            inwardId: initialData.inwardId || (initialData as any).inward_id || undefined,
+            dueDate: initialData.dueDate || (initialData as any).due_date ? new Date(initialData.dueDate || (initialData as any).due_date).toISOString().split('T')[0] : '',
+            items: (initialData.items || []).map((it: any, idx: number) => {
+               const isWop = String(initialData.billType || (initialData as any).bill_type || '').toLowerCase().includes('without');
+               const qty = isWop ? 0 : (Number(it.quantity ?? it.qty ?? 0) || 0);
+               const wop = Number(it.wopQty ?? it.wop_qty ?? 0) || 0;
+               const price = Number(it.unitPrice ?? it.unit_price ?? it.price ?? 0) || 0;
+               const amount = isWop ? 0 : Number((qty * price).toFixed(2));
+               const rate = Number(initialData.taxRate || (initialData as any).tax_rate || 18);
+               const tax = Number((amount * (rate / 100)).toFixed(2));
+               return {
+                  ...it,
+                  id: it.id || `edit_item_${idx}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+                  inwardItemIndex: it.inwardItemIndex !== undefined ? it.inwardItemIndex : idx,
+                  quantity: qty,
+                  wopQty: wop,
+                  unitPrice: price,
+                  amount,
+                  tax,
+                  total: Number((amount + tax).toFixed(2)),
+                  fromInward: !!(initialData.inwardId || (initialData as any).inward_id)
+               };
+            })
+         };
+         setFormData(mappedData);
+
+         // Fetch specific invoice to populate maxQty for validation in edit mode
+         if (mode === 'edit' && mappedData.inwardId && mappedData.id) {
+             api.get(`/invoices?invoiceNos=${mappedData.id}`)
+             .then(res => {
+                 const data = res.data;
+                 if (data.items && data.items.length > 0) {
+                     const fetchedInvoice = data.items[0];
+                     if (fetchedInvoice.items) {
+                         setFormData((prev: any) => {
+                             const updatedItems = prev.items.map((item: any, idx: number) => {
+                                 let matched = fetchedInvoice.items[idx];
+                                 if (!matched || String(matched.id) !== String(item.id)) {
+                                    matched = fetchedInvoice.items.find((fi: any, fIdx: number) => 
+                                        String(fi.id) === String(item.id) || fIdx === idx
+                                    );
+                                 }
+                                 return matched && matched.maxQty !== undefined ? { ...item, maxQty: matched.maxQty } : item;
+                             });
+                             return { ...prev, items: updatedItems };
+                         });
+                     }
+                 }
+             })
+             .catch(err => console.error('Failed to fetch maxQty', err));
+         }
+      }
+   }, [initialData, mode, customers, vendors]);
+
+   const populateFromInward = (inward: any) => {
+      const partyId = inward.customerId || inward.customer_id || inward.vendorId || (inward as any).vendor_id;
+      const isVendor = !!(inward.vendorId || (inward as any).vendor_id || inward.partyType === 'vendor' || (inward as any).party_type === 'vendor');
+      
+      const party = isVendor 
+         ? vendors.find(v => String(v.id) === String(partyId))
+         : customers.find(c => String(c.id) === String(partyId));
+
+      const formattedAddress = isVendor 
+         ? [(party as any)?.address || (party as any)?.street1, (party as any)?.street2, (party as any)?.city, (party as any)?.state, (party as any)?.pinCode ?? (party as any)?.pin_code].filter(Boolean).join(', ')
+         : [(party as any)?.street1, (party as any)?.street2, (party as any)?.city, (party as any)?.state, (party as any)?.pinCode ?? (party as any)?.pin_code].filter(Boolean).join(', ');
+
+      const formatToDateInput = (d: any) => {
+         if (!d) return '';
+         try {
+            return new Date(d).toISOString().split('T')[0];
+         } catch (e) { return ''; }
+      };
+
+      setFormData((prev: any) => {
+         try {
+            const pDate = formatToDateInput(inward.po_date || inward.poDate);
+            const dDate = formatToDateInput(inward.dc_date || inward.dcDate);
+
+            return {
+               ...prev,
+               customerId: partyId || prev.customerId,
+               customerName: inward.customerName || inward.customer_name || inward.vendorName || (inward as any).vendor_name || party?.name || (party as any)?.company || prev.customerName,
+               address: inward.address || formattedAddress || prev.address,
+               shippingName: inward.shippingName || inward.shipping_name || prev.shippingName,
+               shippingAddress: inward.shippingAddress || inward.shipping_address || (party as any)?.shippingAddress || (party as any)?.shipping_address || prev.shippingAddress,
+               shippingState: inward.shippingState || inward.shipping_state || (party as any)?.shippingState || (party as any)?.shipping_state || prev.shippingState,
+               shippingGstin: inward.shippingGstin || inward.shipping_gstin || (party as any)?.shippingGstin || (party as any)?.shipping_gstin || prev.shippingGstin,
+               poNo: inward.po_reference || inward.poReference || '',
+               po_no: inward.po_reference || inward.poReference || '',
+               poDate: pDate,
+               po_date: pDate,
+               dcNo: inward.dc_no || inward.dcNo || '',
+               dc_no: inward.dc_no || inward.dcNo || '',
+               dcDate: dDate,
+               dc_date: dDate,
+               gstin: (inward as any).gstin || party?.gst || (party as any)?.gstin || prev.gstin,
+               state: (inward as any).state || party?.state || prev.state,
+               stateCode: (inward as any).stateCode || (inward as any).state_code || (party as any)?.stateCode || (party as any)?.state_code || prev.stateCode || '',
+               inwardId: inward.id,
+               items: (inward.items || [])
+                  .map((item: any, idx: number) => {
+                     const pf = findPrice(
+                        prev.company_id,
+                        inward.customerId || inward.customer_id || prev.customerId,
+                        item.item_name || item.description || '',
+                        item.process || ''
+                     ) as any;
+
+                     const unitPrice = pf ? pf.price : 0;
+                     const qty = isVendor 
+                        ? Number(item.vendorWorkBalance ?? item.billingBalance ?? 0)
+                        : Number(item.billingBalance ?? 0);
+                     const isWop = prev.billType === 'Without Process' || String(prev.billType).toLowerCase().includes('without');
+                     const amount = isWop ? 0 : qty * unitPrice;
+                     const tax = amount * (prev.taxRate / 100);
+
+                     return {
+                        id: `inw_${idx}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+                        inwardItemIndex: idx,
+                        description: item.item_name || item.description || '',
+                        process: item.process || '',
+                        quantity: isWop ? 0 : qty,
+                        wopQty: isWop ? qty : 0,
+                        maxQty: qty,
+                        unitPrice: unitPrice,
+                        priceFixingId: pf ? pf.id : undefined,
+                        amount: amount,
+                        tax: tax,
+                        total: amount + tax,
+                        fromInward: true
+                     };
+                  })
+                  .filter((item: any) => item.quantity > 0 || item.wopQty > 0)
+            };
+         } catch (err) {
+            return prev;
+         }
+      });
+   };
+
+   const fetchPendingForCustomer = async (partyId: string, isVendorParty?: boolean) => {
+      if (!partyId) {
+         setPendingInwards([]);
+         return;
+      }
+
+      setInwardLoading(true);
+      try {
+         // Set immediate local state if available to avoid UI lag
+         const filtered = inwards.filter((inv: any) => {
+            const notCompleted = (inv.status || '').toLowerCase() !== 'completed';
+            const isVendor = isVendorParty || !!inv.vendorId || inv.partyType === 'vendor';
+            let hasBillable = false;
+            (inv.items || []).forEach((it: any) => {
+               const bal = isVendor 
+                  ? (it.vendorWorkBalance ?? it.billingBalance ?? 0)
+                  : (it.billingBalance ?? 0);
+               if (Number(bal) > 0) hasBillable = true;
+            });
+            if (isVendorParty) {
+               return notCompleted && hasBillable && String(inv.vendorId || inv.vendor_id || '') === String(partyId);
+            }
+            return notCompleted && hasBillable && String(inv.customerId || inv.customer_id || '') === String(partyId);
+         });
+
+         if (filtered.length > 0) {
+            setPendingInwards(filtered);
+         }
+
+         // Always fetch latest live pending records directly from server with up-to-date balances
+         const url = isVendorParty
+            ? `/inward?vendorId=${partyId}&status=pending&purpose=invoice&limit=100`
+            : `/inward/pending/${partyId}?purpose=invoice`;
+         const res = await api.get(url);
+         const data = res.data;
+         const results = Array.isArray(data) ? data : (data?.items || []);
+         const finalResults = results.filter((inv: any) => {
+            const notCompleted = (inv.status || '').toLowerCase() !== 'completed';
+            const isVendor = isVendorParty || !!inv.vendorId || inv.partyType === 'vendor';
+            let hasBillable = false;
+            (inv.items || []).forEach((it: any) => {
+               const bal = isVendor 
+                  ? (it.vendorWorkBalance ?? it.billingBalance ?? 0)
+                  : (it.billingBalance ?? 0);
+               if (Number(bal) > 0) hasBillable = true;
+            });
+            return notCompleted && hasBillable;
+         });
+         setPendingInwards(finalResults);
+      } catch (err) {
+         console.error('Failed to fetch pending inwards from server', err);
+      } finally {
+         setInwardLoading(false);
+      }
+   };
+
+   useEffect(() => {
+      if (mode === 'create' && inwardId) {
+         if (inwardPopulatedRef.current === inwardId) {
+            setInwardInitLoading(false);
+            return;
+         }
+
+         // Immediate cache populate if already present in store
+         const cachedInward = inwards.find(i => String(i.id) === String(inwardId));
+         if (cachedInward && !inwardPopulatedRef.current) {
+            inwardPopulatedRef.current = inwardId;
+            populateFromInward(cachedInward);
+            setInwardInitLoading(false);
+            const isVendorInward = !!(cachedInward as any).vendorId || !!(cachedInward as any).vendor_id || cachedInward.partyType === 'vendor';
+            fetchPendingForCustomer((cachedInward as any).customerId || (cachedInward as any).customer_id || (cachedInward as any).vendorId || (cachedInward as any).vendor_id || '', isVendorInward);
+         }
+
+         // Fetch fresh live balance directly from server immediately without waiting for other lists
+         api.get(`/inward/${inwardId}`)
+            .then((res: any) => {
+               const entry = res.data;
+               if (entry) {
+                  inwardPopulatedRef.current = inwardId;
+                  populateFromInward(entry);
+                  const isVendorInward = !!(entry as any).vendorId || !!(entry as any).vendor_id || entry.partyType === 'vendor';
+                  fetchPendingForCustomer((entry as any).customerId || (entry as any).customer_id || (entry as any).vendorId || (entry as any).vendor_id || '', isVendorInward);
+               }
+            })
+            .catch((err: any) => {
+               console.error('Failed to fetch live inward by id, falling back to store', err);
+               if (!inwardPopulatedRef.current) {
+                  const inward = inwards.find(i => String(i.id) === String(inwardId));
+                  if (inward) {
+                     inwardPopulatedRef.current = inwardId;
+                     populateFromInward(inward);
+                     const isVendorInward = !!(inward as any).vendorId || !!(inward as any).vendor_id || inward.partyType === 'vendor';
+                     fetchPendingForCustomer((inward as any).customerId || (inward as any).customer_id || (inward as any).vendorId || (inward as any).vendor_id || '', isVendorInward);
+                  }
+               }
+            })
+            .finally(() => setInwardInitLoading(false));
+      } else if (!inwardId) {
+         setInwardInitLoading(false);
+      }
+   }, [inwardId, mode]);
+
+   // Asynchronously enrich party address/gstin once customers or vendors finish loading
+   useEffect(() => {
+      if (formData.customerId && (!formData.address || !formData.gstin)) {
+         const partyId = String(formData.customerId);
+         const party = vendors.find(v => String(v.id) === partyId) || customers.find(c => String(c.id) === partyId);
+         if (party) {
+            const isVendor = !!vendors.find(v => String(v.id) === partyId);
+            const formattedAddress = isVendor 
+               ? [(party as any)?.address || (party as any)?.street1, (party as any)?.street2, (party as any)?.city, (party as any)?.state, (party as any)?.pinCode ?? (party as any)?.pin_code].filter(Boolean).join(', ')
+               : [(party as any)?.street1, (party as any)?.street2, (party as any)?.city, (party as any)?.state, (party as any)?.pinCode ?? (party as any)?.pin_code].filter(Boolean).join(', ');
+            setFormData((prev: any) => ({
+               ...prev,
+               customerName: prev.customerName || (party as any).name || (party as any).company,
+               address: prev.address || formattedAddress,
+               gstin: prev.gstin || (party as any).gst || (party as any).gstin,
+               state: prev.state || (party as any).state,
+               stateCode: prev.stateCode || (party as any).stateCode || (party as any).state_code,
+            }));
+         }
+      }
+   }, [customers.length, vendors.length, formData.customerId]);
+
+   useEffect(() => {
+      const isWop = formData.billType === 'Without Process' || String(formData.billType).toLowerCase().includes('without');
+      const subTotal = isWop ? 0 : Number((formData.items || []).reduce((sum: number, item: any) => {
+         const qty = isWop ? 0 : (Number(item.quantity) || 0);
+         const price = Number(item.unitPrice) || 0;
+         const amt = Number(item.amount !== undefined && item.amount !== null ? item.amount : (qty * price));
+         return sum + amt;
+      }, 0).toFixed(2));
+
+      const discount = Number(formData.discount || 0);
+      const taxableAmount = Math.max(0, subTotal - discount);
+      const taxRate = Number(formData.taxRate || 0);
+      const taxTotal = isWop ? 0 : Number(((taxableAmount * taxRate) / 100).toFixed(2));
+      const otherCharges = Number(formData.otherCharges || 0);
+      const grandTotal = isWop ? 0 : Math.round(taxableAmount + taxTotal + otherCharges);
+
+      if (formData.subTotal !== subTotal || formData.taxTotal !== taxTotal || formData.grandTotal !== grandTotal) {
+         setFormData((prev: any) => ({
+            ...prev,
+            subTotal,
+            taxTotal,
+            grandTotal
+         }));
+      }
+   }, [formData.items, formData.discount, formData.otherCharges, formData.taxRate, formData.billType]);
+
+   // Recalculate items when billType or taxRate changes
+   useEffect(() => {
+      if (formData.items && formData.items.length > 0) {
+         const isWop = formData.billType === 'Without Process' || String(formData.billType).toLowerCase().includes('without');
+         const isWp = formData.billType === 'With Process' || String(formData.billType).toLowerCase() === 'with_process';
+         const rate = Number(formData.taxRate) || 18;
+
+         const updatedItems = formData.items.map((item: any) => {
+            let newQty = Number(item.quantity) || 0;
+            let newWop = Number(item.wopQty) || 0;
+            
+            if (isWop) {
+               newWop = newQty + newWop;
+               newQty = 0;
+            } else if (isWp) {
+               newQty = newQty + newWop;
+               newWop = 0;
+            }
+
+            const taxableQty = isWop ? 0 : newQty;
+            const price = Number(item.unitPrice) || 0;
+            const amount = Number((taxableQty * price).toFixed(2));
+            const tax = Number((amount * (rate / 100)).toFixed(2));
+
+            return {
+               ...item,
+               quantity: newQty,
+               wopQty: newWop,
+               unitPrice: price,
+               amount,
+               tax,
+               total: Number((amount + tax).toFixed(2))
+            };
+         });
+         
+         const hasChanged = JSON.stringify(updatedItems) !== JSON.stringify(formData.items);
+         if (hasChanged) {
+            setFormData((prev: any) => ({ ...prev, items: updatedItems }));
+         }
+      }
+   }, [formData.billType, formData.taxRate]);
+
+   // Auto-populate item prices when priceFixings finishes loading or updates
+   useEffect(() => {
+      if (priceFixings.length > 0 && formData.customerId && formData.items?.length > 0) {
+         setFormData((prev: any) => {
+            let hasPriceUpdate = false;
+            const isWop = prev.billType === 'Without Process' || String(prev.billType).toLowerCase().includes('without');
+            const rate = Number(prev.taxRate) || 18;
+
+            const updatedItems = (prev.items || []).map((item: any) => {
+               if (item.description && (!item.unitPrice || Number(item.unitPrice) === 0)) {
+                  const pf = findPrice(prev.company_id, prev.customerId, item.description, item.process);
+                  if (pf && pf.price > 0) {
+                     hasPriceUpdate = true;
+                     const qty = isWop ? 0 : (Number(item.quantity) || 0);
+                     const price = Number(pf.price);
+                     const amount = Number((qty * price).toFixed(2));
+                     const tax = Number((amount * (rate / 100)).toFixed(2));
+                     return {
+                        ...item,
+                        unitPrice: price,
+                        priceFixingId: pf.id,
+                        amount,
+                        tax,
+                        total: Number((amount + tax).toFixed(2))
+                     };
+                  }
+               }
+               return item;
+            });
+
+            if (hasPriceUpdate) {
+               return { ...prev, items: updatedItems };
+            }
+            return prev;
+         });
+      }
+   }, [priceFixings.length, formData.customerId]);
+
+   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+      const { name, value } = e.target;
+      if (name === 'customerId') {
+         const customer = customers.find(c => String(c.id) === String(value));
+         const vendor = vendors.find(v => String(v.id) === String(value));
+         const entity = customer || vendor;
+         const entityAddress = entity ? [
+            (entity as any)?.street1 || (entity as any)?.address,
+            (entity as any)?.street2,
+            (entity as any)?.city,
+            (entity as any)?.state,
+            (entity as any)?.pinCode ?? (entity as any)?.pin_code
+         ].filter(Boolean).join(', ') : '';
+
+         setFormData((prev: any) => {
+            const isWop = prev.billType === 'Without Process' || String(prev.billType).toLowerCase().includes('without');
+            const rate = Number(prev.taxRate) || 18;
+            const updatedItems = (prev.items || []).map((it: any) => {
+               if (it.description) {
+                  const pf = findPrice(prev.company_id, String(value), it.description, it.process);
+                  if (pf && pf.price > 0) {
+                     const qty = isWop ? 0 : (Number(it.quantity) || 0);
+                     const price = Number(pf.price);
+                     const amount = Number((qty * price).toFixed(2));
+                     const tax = Number((amount * (rate / 100)).toFixed(2));
+                     return {
+                        ...it,
+                        unitPrice: price,
+                        priceFixingId: pf.id,
+                        amount,
+                        tax,
+                        total: Number((amount + tax).toFixed(2))
+                     };
+                  }
+               }
+               return it;
+            });
+
+            return {
+               ...prev,
+               [name]: value,
+               customerName: entity?.name || (entity as any)?.company || '',
+               address: entityAddress || (entity as any)?.address || (entity as any)?.street1 || '',
+               shippingName: (entity as any)?.shippingName || (entity as any)?.shipping_name || '',
+               shippingAddress: (entity as any)?.shippingAddress || (entity as any)?.shipping_address || '',
+               shippingState: (entity as any)?.shippingState || (entity as any)?.shipping_state || '',
+               shippingGstin: (entity as any)?.shippingGstin || (entity as any)?.shipping_gstin || '',
+               gstin: entity?.gst || (entity as any)?.gstin || '',
+               state: entity?.state || '',
+               stateCode: (entity as any)?.stateCode || (entity as any)?.state_code || '',
+               inwardId: undefined,
+               items: updatedItems
+            };
+         });
+
+         fetchPendingForCustomer(value, !!vendors.find(v => String(v.id) === String(value)));
+      } else {
+         let updates: any = { [name]: value };
+         if (name === 'poNo') updates.po_no = value;
+         if (name === 'dcNo') updates.dc_no = value;
+         if (name === 'poDate') updates.po_date = value;
+         if (name === 'dcDate') updates.dc_date = value;
+
+         setFormData((prev: any) => ({ ...prev, ...updates }));
+      }
+   };
+
+   const handleSearchByReference = async (query: string) => {
+      if (!query || query.length < 3) return;
+      
+      setInwardLoading(true);
+      try {
+         const activeToken = authToken || localStorage.getItem('token');
+         const res = await fetch(`/api/inward?search=${encodeURIComponent(query)}&status=pending&purpose=invoice&limit=10`, {
+            headers: {
+               'Authorization': `Bearer ${activeToken?.replace(/^"|"$/g, '')}`
+            }
+         });
+         const data = await res.json();
+         const results = data.items || [];
+         
+         if (results.length > 0) {
+            // Find exact match first
+            const exactMatch = results.find((r: any) => 
+               String(r.dcNo || r.dc_no || '').toLowerCase() === query.toLowerCase() || 
+               String(r.poReference || r.po_reference || '').toLowerCase() === query.toLowerCase()
+            );
+            
+            const target = exactMatch || results[0];
+            populateFromInward(target);
+            fetchPendingForCustomer(target.customerId || target.customer_id || target.vendorId || (target as any).vendor_id);
+         } else {
+            setModal({
+               isOpen: true,
+               type: 'error',
+               title: 'No Record Found',
+               message: `No pending inward record found for reference "${query}".`
+            });
+         }
+      } catch (err) {
+         console.error('Search failed', err);
+      } finally {
+         setInwardLoading(false);
+      }
+   };
+
+   const handleGstLookup = async (gstinOverride?: string) => {
+
+      const gstinToVerify = gstinOverride || formData.gstin;
+      if (!gstinToVerify || gstinToVerify.length !== 15) {
+         setGstError('Enter 15-digit GSTIN');
+         return;
+      }
+
+      try {
+         setGstLoading(true);
+         setGstError(null);
+         const response = await fetch(`/api/gst-lookup?gstin=${gstinToVerify.toUpperCase()}`);
+         if (!response.ok) throw new Error('Lookup failed');
+         const result = await response.json();
+         const data = result.data;
+
+         if (data) {
+            setFormData((prev: any) => ({
+               ...prev,
+               customerName: data.legal_name || prev.customerName,
+               address: data.address || prev.address,
+               state: data.state_jurisdiction || prev.state,
+               gstin: gstinToVerify.toUpperCase()
+            }));
+         }
+      } catch (err) {
+         setGstError('GSTIN lookup failed. Please fill manually.');
+      } finally {
+         setGstLoading(false);
+      }
+   };
+
+   const handleItemChange = (index: number, field: string, value: any) => {
+      const newItems = [...formData.items];
+      const item = { ...newItems[index] };
+
+      if (field === 'quantity' || field === 'wopQty') {
+         let numericVal = value === '' ? 0 : Math.max(0, Number(value));
+         item[field] = value === '' ? '' : numericVal;
+         
+         if (item.maxQty !== undefined) {
+            const otherField = field === 'quantity' ? 'wopQty' : 'quantity';
+            let otherVal = Number(item[otherField]) || 0;
+            
+            if (numericVal > item.maxQty) {
+               item[field] = item.maxQty;
+               item[otherField] = 0;
+               setModal({
+                  isOpen: true,
+                  type: 'error',
+                  title: 'Quantity Exceeded',
+                  message: `You cannot enter a quantity greater than the Total Qty (${item.maxQty}). The value has been automatically adjusted.`
+               });
+            } else if (numericVal + otherVal > item.maxQty) {
+               item[otherField] = item.maxQty - numericVal;
+            }
+         }
+      } else if (field === 'unitPrice') {
+         item.unitPrice = value === '' ? '' : Math.max(0, Number(value));
+      } else {
+         item[field] = value;
+      }
+
+      if (field === 'description' || field === 'process' || field === 'customerId') {
+         const desc = field === 'description' ? value : item.description;
+         const proc = field === 'process' ? value : item.process;
+         const pf = findPrice(formData.company_id, formData.customerId, desc, proc);
+         item.unitPrice = pf ? pf.price : 0;
+         item.priceFixingId = pf ? pf.id : undefined;
+      }
+
+      // Calculate item amount, tax, and total
+      const isWop = formData.billType === 'Without Process' || String(formData.billType).toLowerCase().includes('without');
+      const qty = isWop ? 0 : (Number(item.quantity) || 0);
+      const price = Number(item.unitPrice) || 0;
+      const rate = Number(formData.taxRate) || 18;
+         
+      item.amount = Number((qty * price).toFixed(2));
+      item.tax = Number((item.amount * (rate / 100)).toFixed(2));
+      item.total = Number((item.amount + item.tax).toFixed(2));
+
+      newItems[index] = item;
+      setFormData((prev: any) => ({ ...prev, items: newItems }));
+   };
+
+   const [isDirty, setIsDirty] = useState(false);
+
+   const handleSubmit = async (e: React.FormEvent | React.MouseEvent) => {
+      e.preventDefault();
+      if (loading) return;
+
+      // 1. Validate Customer
+      if (!formData.customerId || !String(formData.customerId).trim()) {
+         setModal({
+            isOpen: true,
+            type: 'error',
+            title: 'Customer Required',
+            message: 'Please select a Customer before submitting the invoice.'
+         });
+         return;
+      }
+
+      // 2. Validate Items existence
+      if (!formData.items || formData.items.length === 0) {
+         setModal({
+            isOpen: true,
+            type: 'error',
+            title: 'No Items Added',
+            message: 'Please add at least one line item to the invoice.'
+         });
+         return;
+      }
+
+      const isWop = formData.billType === 'Without Process' || String(formData.billType).toLowerCase().includes('without');
+
+      // 3. Validate Line Items: Quantity and Price Amount
+      for (let i = 0; i < formData.items.length; i++) {
+         const item = formData.items[i];
+         const itemDesc = item.description || item.item_name || `Row #${i + 1}`;
+         const qty = isWop ? (Number(item.wopQty) || Number(item.quantity) || 0) : (Number(item.quantity) || 0);
+
+         if (qty <= 0) {
+            setModal({
+               isOpen: true,
+               type: 'error',
+               title: 'Quantity Required',
+               message: `Please enter the quantity for item "${itemDesc}".`
+            });
+            return;
+         }
+
+         if (!isWop) {
+            const price = Number(item.unitPrice || 0);
+            if (price <= 0) {
+               setModal({
+                  isOpen: true,
+                  type: 'error',
+                  title: 'Enter Price Amount',
+                  message: `Please enter the price amount for item "${itemDesc}".`
+               });
+               return;
+            }
+         }
+      }
+
+      // 4. Validate Invoice Number
+      if (!formData.invoiceNumber || !String(formData.invoiceNumber).trim()) {
+         setModal({
+            isOpen: true,
+            type: 'error',
+            title: 'Invoice Number Required',
+            message: 'Please enter the Invoice Number.'
+         });
+         return;
+      }
+
+      try {
+         setLoading(true);
+
+         // Validation Check for maxQty
+         if (formData.inwardId) {
+            const itemSums = new Map<string, { sum: number; desc: string; proc: string; maxQty: number }>();
+            for (const item of formData.items) {
+               const d = String(item.description || item.item_name || '').toLowerCase().trim();
+               const p = String(item.process || '').toLowerCase().trim();
+               const k = `${d}::${p}`;
+               const itemQty = (Number(item.quantity) || 0) + (Number(item.wopQty) || 0);
+               const existing = itemSums.get(k) || { sum: 0, desc: item.description || d, proc: item.process || p, maxQty: 0 };
+               existing.sum += itemQty;
+               if (item.maxQty !== undefined) {
+                  existing.maxQty += (Number(item.maxQty) || 0);
+               }
+               itemSums.set(k, existing);
+            }
+
+            for (const entry of Array.from(itemSums.values())) {
+               if (entry.maxQty > 0 && entry.sum > entry.maxQty + 0.5) {
+                  const displayName = entry.proc ? `${entry.desc} (${entry.proc})` : entry.desc;
+                  setModal({
+                     isOpen: true,
+                     type: 'error',
+                     title: 'Quantity Exceeded',
+                     message: `Total quantity for item "${displayName}" (${entry.sum}) exceeds the maximum available balance (${entry.maxQty}).`
+                  });
+                  setLoading(false);
+                  return;
+               }
+            }
+         }
+
+         // Clean items to remove internal UI fields (like priceFixingId) before sending to backend
+         const isWop = formData.billType === 'Without Process' || String(formData.billType).toLowerCase().includes('without');
+         const isWp = formData.billType === 'With Process' || String(formData.billType).toLowerCase() === 'with_process' || formData.billType === 'INVOICE';
+         
+         const cleanedItems = formData.items.map(({ priceFixingId, maxQty, ...rest }: any) => {
+            const qty = isWop ? 0 : (Number(rest.quantity) || 0);
+            const wop = isWp ? 0 : (Number(rest.wopQty) || 0);
+            const price = Number(rest.unitPrice) || 0;
+            const amount = isWop ? 0 : Number((qty * price).toFixed(2));
+            const taxRate = Number(formData.taxRate) || 18;
+            const tax = Number((amount * (taxRate / 100)).toFixed(2));
+
+            return {
+               ...rest,
+               quantity: qty,
+               wopQty: wop,
+               unitPrice: price,
+               amount,
+               tax,
+               total: Number((amount + tax).toFixed(2))
+            };
+         });
+
+         const calculatedSubTotal = isWop ? 0 : Number(cleanedItems.reduce((sum: number, it: any) => sum + it.amount, 0).toFixed(2));
+         const discount = Number(formData.discount || 0);
+         const taxableAmount = Math.max(0, calculatedSubTotal - discount);
+         const taxRate = Number(formData.taxRate) || 18;
+         const calculatedTaxTotal = isWop ? 0 : Number(((taxableAmount * taxRate) / 100).toFixed(2));
+         const otherCharges = Number(formData.otherCharges || 0);
+         const calculatedGrandTotal = isWop ? 0 : Math.round(taxableAmount + calculatedTaxTotal + otherCharges);
+
+         const submissionData = {
+            ...formData,
+            items: cleanedItems,
+            subTotal: calculatedSubTotal,
+            taxTotal: calculatedTaxTotal,
+            grandTotal: calculatedGrandTotal
+         };
+
+         if (mode === 'create') {
+            const result = await (dispatch as any)(addInvoice(submissionData)).unwrap();
+            
+             console.log("Invoice created successfully, backend handled challan consolidation.");
+
+            // Sync Price Fixing Changes
+            for (const item of formData.items) {
+               if (item.unitPrice > 0) {
+                  try {
+                     if (item.priceFixingId) {
+                        // UPDATE EXISTING
+                        const masterPf = priceFixings.find(pf => String(pf.id) === String(item.priceFixingId));
+                        if (masterPf && Number(masterPf.price) !== Number(item.unitPrice)) {
+                           await (dispatch as any)(updatePriceFixingThunk({ 
+                              ...masterPf,
+                              price: Number(item.unitPrice) 
+                           })).unwrap();
+                        }
+                     } else {
+                        // CREATE NEW IF NOT EXISTS
+                        const existingPf = findPrice(formData.company_id, formData.customerId, item.description, item.process);
+                        
+                        if (!existingPf) {
+                           const masterItem = masterItems.find(mi => String(mi.itemName).toLowerCase() === String(item.description).toLowerCase());
+                           const masterProc = masterProcesses.find(mp => String(mp.processName).toLowerCase() === String(item.process).toLowerCase());
+                           
+                           // ONLY CREATE IF ALL DATA IS PRESENT
+                           if (formData.customerId && formData.customerName && masterItem?.id) {
+                              await (dispatch as any)(createPriceFixingThunk({
+                                 customerId: String(formData.customerId),
+                                 customerName: String(formData.customerName),
+                                 itemId: String(masterItem.id),
+                                 itemName: String(item.description),
+                                 processId: masterProc?.id ? String(masterProc.id) : '',
+                                 processName: item.process || '',
+                                 price: Number(item.unitPrice),
+                                 company_id: String(formData.company_id)
+                              })).unwrap();
+                           }
+                        } else if (Number(existingPf.price) !== Number(item.unitPrice)) {
+                           await (dispatch as any)(updatePriceFixingThunk({ 
+                              id: existingPf.id, 
+                              price: Number(item.unitPrice),
+                              customerId: String(formData.customerId),
+                              customerName: String(formData.customerName),
+                              itemId: String(existingPf.itemId),
+                              itemName: String(item.description),
+                              processId: String(existingPf.processId),
+                              processName: String(item.process || ''),
+                              company_id: String(formData.company_id)
+                           })).unwrap();
+                        }
+                     }
+                  } catch (pfErr: any) {
+                     console.error("Price fixing sync failed for item:", item.description, pfErr?.response?.data || pfErr.message || pfErr);
+                  }
+               }
+            }
+
+            // Immediately refresh price fixings store so next invoice uses the latest prices
+            (dispatch as any)(fetchPriceFixings({ company_id: formData.company_id || company?.id, limit: 10000 }));
+
+            setModal({
+               isOpen: true,
+               type: 'success',
+               title: 'Success!',
+               message: "Invoice created successfully. Consolidated Challan updated."
+            });
+         } else {
+            await (dispatch as any)(updateInvoice({ ...submissionData, id: initialData?.id || '' })).unwrap();
+
+            // Sync Price Fixing Changes (also for edit mode)
+            for (const item of formData.items) {
+               if (item.unitPrice > 0) {
+                  try {
+                     if (item.priceFixingId) {
+                        // UPDATE EXISTING
+                        const masterPf = priceFixings.find(pf => String(pf.id) === String(item.priceFixingId));
+                        if (masterPf && Number(masterPf.price) !== Number(item.unitPrice)) {
+                           await (dispatch as any)(updatePriceFixingThunk({ 
+                              ...masterPf,
+                              price: Number(item.unitPrice) 
+                           })).unwrap();
+                        }
+                     } else {
+                        // CREATE NEW IF NOT EXISTS
+                        const existingPf = findPrice(formData.company_id, formData.customerId, item.description, item.process);
+                        
+                        if (!existingPf) {
+                           const masterItem = masterItems.find(mi => String(mi.itemName).toLowerCase() === String(item.description).toLowerCase());
+                           const masterProc = masterProcesses.find(mp => String(mp.processName).toLowerCase() === String(item.process).toLowerCase());
+                           
+                           // ONLY CREATE IF ALL DATA IS PRESENT
+                           if (formData.customerId && formData.customerName && masterItem?.id) {
+                              await (dispatch as any)(createPriceFixingThunk({
+                                 customerId: String(formData.customerId),
+                                 customerName: String(formData.customerName),
+                                 itemId: String(masterItem.id),
+                                 itemName: String(item.description),
+                                 processId: masterProc?.id ? String(masterProc.id) : '',
+                                 processName: item.process || '',
+                                 price: Number(item.unitPrice),
+                                 company_id: String(formData.company_id)
+                              })).unwrap();
+                           }
+                        } else if (Number(existingPf.price) !== Number(item.unitPrice)) {
+                           await (dispatch as any)(updatePriceFixingThunk({ 
+                              id: existingPf.id, 
+                              price: Number(item.unitPrice),
+                              customerId: String(formData.customerId),
+                              customerName: String(formData.customerName),
+                              itemId: String(existingPf.itemId),
+                              itemName: String(item.description),
+                              processId: String(existingPf.processId),
+                              processName: String(item.process || ''),
+                              company_id: String(formData.company_id)
+                           })).unwrap();
+                        }
+                     }
+                  } catch (pfErr: any) {
+                     console.error("Price fixing sync failed for item in edit mode:", item.description, pfErr?.response?.data || pfErr.message || pfErr);
+                  }
+               }
+            }
+
+            // Immediately refresh price fixings store so next invoice uses the latest prices
+            (dispatch as any)(fetchPriceFixings({ company_id: formData.company_id || company?.id, limit: 10000 }));
+
+            setModal({
+               isOpen: true,
+               type: 'success',
+               title: 'Success!',
+               message: "Invoice updated successfully."
+            });
+         }
+
+      } catch (error: any) {
+         const serverMsg = error?.response?.data?.message || error?.response?.data?.error || error?.message;
+         let displayMsg = serverMsg;
+         if (!displayMsg || displayMsg === 'Something went wrong.') {
+            displayMsg = 'Failed to save invoice. Please ensure all item prices and quantities are filled in properly.';
+         }
+         setModal({
+            isOpen: true,
+            type: 'error',
+            title: 'Invoice Submission Error',
+            message: displayMsg
+         });
+      } finally {
+         setLoading(false);
+      }
+   };
+
+
+
+   const memoizedItemOptions = React.useMemo(() => {
+      return (masterItems || []).map(mi => ({
+         value: mi.itemName,
+         label: mi.itemName
+      }));
+   }, [masterItems]);
+
+   const memoizedProcessOptions = React.useMemo(() => {
+      return (masterProcesses || []).map(p => ({
+         value: p.processName,
+         label: p.processName
+      }));
+   }, [masterProcesses]);
+
+   const isPageLoading = !isComponentMounted || 
+                         (mode === 'edit' && !initialData) ||
+                         (mode === 'create' && !!inwardId && inwardInitLoading);
+
+   if (isPageLoading) {
+      return (
+         <div className="d-flex flex-column align-items-center justify-content-center py-5 my-5" style={{ minHeight: '400px', gap: '1.5rem' }}>
+            <div className="spinner-border text-primary" role="status" style={{ width: '3.5rem', height: '3.5rem', borderWidth: '4px' }}>
+               <span className="visually-hidden">Loading...</span>
+            </div>
+            <div className="text-center">
+               <h4 className="fw-bold text-dark mb-1">Loading Data...</h4>
+               <p className="text-muted small mb-0">Please wait while we prepare your invoice form.</p>
+            </div>
+         </div>
+      );
+   }
+
+   return (
+
+      <>
+         <div className="card shadow-sm border-0 rounded-4 overflow-hidden">
+            <div className="card-body p-4 p-lg-5">
+               <form onSubmit={(e) => e.preventDefault()} onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'TEXTAREA') {
+                     e.preventDefault();
+                  }
+               }}>
+                  <div className="d-flex align-items-center justify-content-between mb-5 pb-2 gap-4 flex-wrap">
+                     <div className="d-flex align-items-center">
+                        <BackButton
+                           onClick={() => {
+                              const tab = searchParams.get('tab');
+                              if (tab) {
+                                 router.push(`/invoices?tab=${tab}`);
+                              } else {
+                                 router.back();
+                              }
+                           }}
+                           title="Back to Invoices"
+                        />
+                        <h3 className="fw-bold mb-0 text-dark">{mode === 'create' ? 'Create New Invoice' : 'Edit Invoice'}</h3>
+                     </div>
+
+                      {mode === 'create' && !inwardId && (
+                         <div className="d-flex align-items-center gap-3 ms-auto">
+                            <div
+                               className="d-flex align-items-center p-1"
+                               style={{
+                                  background: 'var(--bs-secondary-bg, #f1f3f5)',
+                                  borderRadius: '999px',
+                                  border: '0.5px solid rgba(0,0,0,0.08)',
+                                  gap: '2px',
+                               }}
+                            >
+                               <button
+                                  type="button"
+                                  onClick={() => setSelectionMode('CUSTOMER')}
+                                  style={{
+                                     padding: '6px 18px',
+                                     borderRadius: '999px',
+                                     border: 'none',
+                                     fontSize: '13px',
+                                     fontWeight: 500,
+                                     cursor: 'pointer',
+                                     background: selectionMode === 'CUSTOMER' ? '#f97316' : 'transparent',
+                                     color: selectionMode === 'CUSTOMER' ? '#fff' : '#6c757d',
+                                     transition: 'all 0.15s',
+                                  }}
+                               >
+                                  By Customer
+                               </button>
+                               <button
+                                  type="button"
+                                  onClick={() => setSelectionMode('GSTN')}
+                                  style={{
+                                     padding: '6px 18px',
+                                     borderRadius: '999px',
+                                     border: 'none',
+                                     fontSize: '13px',
+                                     fontWeight: 500,
+                                     cursor: 'pointer',
+                                     background: selectionMode === 'GSTN' ? '#f97316' : 'transparent',
+                                     color: selectionMode === 'GSTN' ? '#fff' : '#6c757d',
+                                     transition: 'all 0.15s',
+                                  }}
+                               >
+                                  By GSTIN
+                               </button>
+                            </div>
+                         </div>
+                      )}
+                  </div>
+
+                  {mode === 'create' && (
+                     <div className="d-flex align-items-center mb-5 pb-4 border-bottom gap-4">
+                        <div className="d-flex align-items-center">
+                           <h5 className="text-danger fw-bold mb-0 me-4" style={{ whiteSpace: 'nowrap' }}>Select the Bill Type</h5>
+                           <div style={{ width: '220px' }}>
+                              <select
+                                 className="form-select py-2 fw-bold"
+                                 style={{ fontSize: '0.85rem' }}
+                                 name="billType"
+                                 value={formData.billType}
+                                 onChange={handleInputChange}
+                              >
+                                 <option value="With Process">With Process</option>
+                                 <option value="Without Process">Without Process</option>
+                                 <option value="Both">Both</option>
+                              </select>
+                           </div>
+                        </div>
+
+                        <div className="d-flex align-items-center gap-2"
+                           style={{
+                              border: formData.customerId ? (pendingInwards.length > 0 ? '1px solid #f97316' : '1px solid #dee2e6') : '1px solid #dee2e6',
+                              borderRadius: '8px',
+                              padding: '6px 14px',
+                              minWidth: '280px',
+                              background: formData.customerId && pendingInwards.length > 0 ? '#fff' : '#f8f9fa',
+                              opacity: formData.customerId ? 1 : 0.6
+                           }}
+                        >
+                           <i className="bi bi-box-seam" style={{ fontSize: '15px', color: formData.customerId && pendingInwards.length > 0 ? '#f97316' : '#6c757d' }}></i>
+                           <select
+                              className="border-0 bg-transparent fw-bold"
+                              style={{ outline: 'none', fontSize: '13px', color: '#212529', flex: 1, cursor: formData.customerId ? 'pointer' : 'not-allowed' }}
+                              onChange={(e) => {
+                                 const selected = pendingInwards.find(i => i.id === e.target.value);
+                                 if (selected) populateFromInward(selected);
+                              }}
+                              value={formData.inwardId || ''}
+                              disabled={!formData.customerId || pendingInwards.length === 0}
+                           >
+                              {!formData.customerId ? (
+                                 <option value="">Select customer first...</option>
+                              ) : pendingInwards.length === 0 ? (
+                                 <option value="">No pending records found</option>
+                              ) : (
+                                 <>
+                                    <option value="">Select Inward Reference</option>
+                                    {pendingInwards.map(i => (
+                                       <option key={i.id} value={i.id}>
+                                          #{i.inward_no || (i as any).inwardNo} - {i.po_reference || (i as any).poReference || 'No PO'} ({(i.items || []).reduce((s: number, it: any) => s + Number((!!i.vendorId || (i as any).party_type === 'vendor' || i.partyType === 'vendor') ? (it.vendorWorkBalance ?? it.billingBalance ?? 0) : (it.billingBalance ?? 0)), 0)} billable)
+                                       </option>
+                                    ))}
+                                 </>
+                              )}
+                           </select>
+                           {inwardLoading && <span className="spinner-border spinner-border-sm text-orange"></span>}
+                        </div>
+                        <div className="d-flex align-items-center gap-2 ms-2" style={{ minWidth: '150px' }}>
+                           <input 
+                              type="text" 
+                              className="form-control fw-bold shadow-none" 
+                              placeholder="HSN (Apply All)"
+                              style={{ fontSize: '0.85rem', padding: '6px 14px', borderRadius: '8px', border: '1px solid #dee2e6' }}
+                              onChange={(e) => {
+                                 const val = e.target.value;
+                                 setFormData((prev: any) => ({
+                                    ...prev,
+                                    items: prev.items.map((it: any) => ({ ...it, hsnCode: val }))
+                                 }));
+                              }}
+                           />
+                        </div>
+                     </div>
+                  )}
+
+                  <div className="">
+                     <div className="row g-4">
+                        <div className="col-md-6">
+                           <div className="mb-3 border-bottom pb-2 d-flex align-items-center" style={{ height: '32px' }}>
+                               <h6 className="fw-bold text-muted text-uppercase mb-0" style={{fontSize: '11px', letterSpacing: '1px'}}>Billing Details</h6>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Customer</label>
+                              <div className="col-sm-9">
+                                 {selectionMode === 'CUSTOMER' ? (
+                                    <SearchableSelect
+                                       options={[
+                                          ...customers.map(c => ({ value: c.id, label: `${c.company || c.name}` })),
+                                          ...vendors.map(v => ({ value: v.id, label: `${v.name}` }))
+                                       ]}
+                                       value={formData.customerId}
+                                       onChange={(val) => handleInputChange({ target: { name: 'customerId', value: val } } as any)}
+                                       placeholder={customersLoading || vendorsLoading ? 'Loading...' : 'Select Customer/Vendor'}
+                                       disabled={customersLoading || vendorsLoading || !!inwardId}
+                                       className="w-100"
+                                    />
+                                  ) : (
+                                    <div className="input-group input-group-sm border rounded overflow-hidden">
+                                       <span className="input-group-text border-0 bg-transparent ps-3"><i className="bi bi-hash text-muted"></i></span>
+                                       <input
+                                          type="text"
+                                          className="form-control border-0 shadow-none py-2 text-uppercase fw-bold"
+                                          placeholder="Enter GSTIN for lookup"
+                                          name="gstin"
+                                          value={formData.gstin || ''}
+                                          onChange={(e) => {
+                                             const val = e.target.value.toUpperCase();
+                                             handleInputChange(e);
+                                             if (val.length === 15) {
+                                                setTimeout(() => handleGstLookup(val), 100);
+                                             }
+                                          }}
+                                          maxLength={15}
+                                          disabled={!!inwardId}
+                                       />
+                                       {gstLoading && <div className="input-group-text border-0 bg-transparent pe-3"><span className="spinner-border spinner-border-sm text-primary"></span></div>}
+                                    </div>
+                                  )}
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Address</label>
+                              <div className="col-sm-9">
+                                 <input
+                                    type="text"
+                                    className="form-control bg-transparent shadow-none px-2"
+                                    name="address"
+                                    value={formData.address || ''}
+                                    onChange={handleInputChange}
+                                    placeholder="Billing address..."
+                                    style={{ height: '38px', fontSize: '0.85rem' }}
+                                 />
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">State</label>
+                              <div className="col-sm-9">
+                                 <input
+                                    type="text"
+                                    className="form-control bg-transparent fw-bold shadow-none px-2"
+                                    name="state"
+                                    placeholder="e.g. KARNATAKA"
+                                    value={formData.state || ''}
+                                    onChange={handleInputChange}
+                                    style={{ height: '38px', fontSize: '0.85rem' }}
+                                 />
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">GSTIN</label>
+                              <div className="col-sm-9">
+                                 <input
+                                    type="text"
+                                    className="form-control bg-transparent text-uppercase fw-bold shadow-none px-2"
+                                    name="gstin"
+                                    placeholder="Billing GSTIN"
+                                    value={formData.gstin || ''}
+                                    onChange={handleInputChange}
+                                    maxLength={15}
+                                    style={{ height: '38px', fontSize: '0.85rem' }}
+                                 />
+                                 {gstError && <div className="text-danger small mt-1">{gstError}</div>}
+                              </div>
+                           </div>
+                        </div>
+
+                        <div className="col-md-6">
+                           <div className="mb-3 border-bottom pb-2 d-flex justify-content-between align-items-center" style={{ height: '32px' }}>
+                               <h6 className="fw-bold text-muted text-uppercase mb-0" style={{fontSize: '11px', letterSpacing: '1px'}}>Shipping Details</h6>
+                               <div className="form-check form-switch mb-0 d-flex align-items-center gap-2">
+                                   <input 
+                                       className="form-check-input shadow-none cursor-pointer m-0" 
+                                       type="checkbox" 
+                                       id="sameAsBilling"
+                                       onChange={(e) => {
+                                           if (e.target.checked) {
+                                               setFormData((prev: any) => ({
+                                                   ...prev,
+                                                   shippingName: prev.customerName,
+                                                   shippingAddress: prev.address,
+                                                   shippingState: prev.state,
+                                                   shippingGstin: prev.gstin
+                                               }));
+                                           } else {
+                                               setFormData((prev: any) => ({
+                                                   ...prev,
+                                                   shippingName: '',
+                                                   shippingAddress: '',
+                                                   shippingState: '',
+                                                   shippingGstin: ''
+                                               }));
+                                           }
+                                       }}
+                                   />
+                                   <label className="form-check-label text-muted fw-bold" style={{fontSize: '10px', cursor: 'pointer', paddingTop: '2px'}} htmlFor="sameAsBilling">
+                                       Same as Billing
+                                   </label>
+                               </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                               <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Due Date <span className="text-danger">*</span></label>
+                               <div className="col-sm-9">
+                                  <input
+                                     type="date"
+                                     className="form-control bg-transparent shadow-none px-2 fw-bold"
+                                     name="dueDate"
+                                     value={formData.dueDate || ''}
+                                     onChange={handleInputChange}
+                                     required
+                                     style={{ height: '38px', fontSize: '0.85rem', borderColor: !formData.dueDate ? '#dc3545' : undefined }}
+                                  />
+                                  {!formData.dueDate && <div className="text-danger" style={{fontSize:'11px',marginTop:'2px'}}>Due date is required</div>}
+                               </div>
+                            </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Name</label>
+                              <div className="col-sm-9">
+                                 <input
+                                    type="text"
+                                    className="form-control bg-transparent shadow-none px-2"
+                                    name="shippingName"
+                                    value={formData.shippingName || ''}
+                                    onChange={handleInputChange}
+                                    placeholder="Shipping name..."
+                                    style={{ height: '38px', fontSize: '0.85rem' }}
+                                 />
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Address</label>
+                              <div className="col-sm-9">
+                                 <input
+                                    type="text"
+                                    className="form-control bg-transparent shadow-none px-2"
+                                    name="shippingAddress"
+                                    value={formData.shippingAddress || ''}
+                                    onChange={handleInputChange}
+                                    placeholder="Shipping address..."
+                                    style={{ height: '38px', fontSize: '0.85rem' }}
+                                 />
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">State</label>
+                              <div className="col-sm-9">
+                                 <input
+                                    type="text"
+                                    className="form-control bg-transparent fw-bold shadow-none px-2"
+                                    name="shippingState"
+                                    placeholder="e.g. KARNATAKA"
+                                    value={formData.shippingState || ''}
+                                    onChange={handleInputChange}
+                                    style={{ height: '38px', fontSize: '0.85rem' }}
+                                 />
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">GSTIN</label>
+                              <div className="col-sm-9">
+                                 <input
+                                    type="text"
+                                    className="form-control bg-transparent text-uppercase fw-bold shadow-none px-2"
+                                    name="shippingGstin"
+                                    placeholder="Shipping GSTIN"
+                                    value={formData.shippingGstin || ''}
+                                    onChange={handleInputChange}
+                                    maxLength={15}
+                                    style={{ height: '38px', fontSize: '0.85rem' }}
+                                 />
+                              </div>
+                           </div>
+                        </div>
+                     </div>
+                  </div>
+
+                  <div className="mb-5">
+                     <div className="row g-4">
+                        <div className="col-md-6">
+                           {(formData.billType === 'Without Process' || formData.billType === 'WOP' || String(formData.billType).toLowerCase().includes('without')) ? (
+                              <div className="row mb-3 align-items-center">
+                                 <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Delivery Challan</label>
+                                 <div className="col-sm-9">
+                                    <input type="text" className="form-control px-2 shadow-none" name="challanNumber" value={formData.challanNumber} onChange={handleInputChange} readOnly={true} style={{ height: '38px', fontSize: '0.85rem' }} />
+                                 </div>
+                              </div>
+                           ) : (
+                              <>
+                                 <div className="row mb-3 align-items-center">
+                                    <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Invoice No</label>
+                                    <div className="col-sm-9">
+                                       <input type="text" className="form-control px-2 fw-bold shadow-none" name="invoiceNumber" value={formData.invoiceNumber} onChange={handleInputChange} readOnly={true} style={{ height: '38px', fontSize: '0.85rem' }} />
+                                    </div>
+                                 </div>
+                                 {formData.billType === 'Both' && (
+                                    <div className="row mb-3 align-items-center">
+                                       <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Delivery Challan</label>
+                                       <div className="col-sm-9">
+                                          <input type="text" className="form-control px-2 shadow-none" name="challanNumber" value={formData.challanNumber || ''} onChange={handleInputChange} readOnly={true} style={{ height: '38px', fontSize: '0.85rem' }} />
+                                       </div>
+                                    </div>
+                                 )}
+                              </>
+                           )}
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Po No</label>
+                              <div className="col-sm-9">
+                                     <input 
+                                        type="text" 
+                                        className="form-control shadow-none px-2" 
+                                        name="poNo" 
+                                        value={formData.poNo || ''} 
+                                        onChange={handleInputChange} 
+                                        onKeyDown={(e) => {
+                                           if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              handleSearchByReference(formData.poNo);
+                                           }
+                                        }}
+                                        placeholder="Type PO No" 
+                                        style={{ height: '38px', fontSize: '0.85rem' }} 
+                                        
+                                     />
+
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Dc No</label>
+                              <div className="col-sm-9">
+                                     <input 
+                                        type="text" 
+                                        className="form-control shadow-none px-2" 
+                                        name="dcNo" 
+                                        value={formData.dcNo || ''} 
+                                        onChange={handleInputChange} 
+                                        onKeyDown={(e) => {
+                                           if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              handleSearchByReference(formData.dcNo);
+                                           }
+                                        }}
+                                        placeholder="Type DC No" 
+                                        style={{ height: '38px', fontSize: '0.85rem' }} 
+                                        
+                                     />
+
+                              </div>
+                           </div>
+                        </div>
+
+                        <div className="col-md-6">
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Date</label>
+                              <div className="col-sm-9">
+                                 <input type="date" className="form-control shadow-none px-2 bg-transparent" name="date" value={formData.date} onChange={handleInputChange} style={{ height: '38px', fontSize: '0.85rem' }} />
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Po Date</label>
+                              <div className="col-sm-9">
+                                 <input type="date" className="form-control shadow-none px-2 bg-transparent" name="poDate" value={formData.poDate || ''} onChange={handleInputChange} style={{ height: '38px', fontSize: '0.85rem' }} />
+                              </div>
+                           </div>
+                           <div className="row mb-3 align-items-center">
+                              <label className="col-sm-3 text-muted x-small text-uppercase fw-bold p-0">Dc Date</label>
+                              <div className="col-sm-9">
+                                 <input type="date" className="form-control shadow-none px-2 bg-transparent" name="dcDate" value={formData.dcDate || ''} onChange={handleInputChange} style={{ height: '38px', fontSize: '0.85rem' }} />
+                              </div>
+                           </div>
+                        </div>
+                     </div>
+                  </div>
+
+                  <div className="table-responsive mb-4">
+                     <table className="table table-borderless align-middle">
+                        <thead>
+                           <tr className="text-muted border-bottom small text-uppercase">
+                              <th className="py-3">Item</th>
+                              <th className="py-3">Process</th>
+                              <th className="py-3 text-center" style={{ width: '120px' }}>HSN Code</th>
+                              {formData.inwardId && <th className="py-3 text-center" style={{ width: '90px' }}>Total Qty</th>}
+                              <th className="py-3 text-center" style={{ width: '80px' }}>
+                                 {formData.billType === 'Without Process' ? 'WOP Qty' : 'WP Qty'}
+                              </th>
+                              {formData.billType === 'Both' && <th className="py-3 text-center" style={{ width: '100px' }}>WOP Qty</th>}
+                              {formData.billType !== 'Without Process' && (
+                                 <>
+                                    <th className="py-3 text-end" style={{ width: '120px' }}>Price</th>
+                                    <th className="py-3 text-end" style={{ width: '150px' }}>Amount</th>
+                                 </>
+                              )}
+                              <th className="py-3 text-center" style={{ width: '60px' }}></th>
+                           </tr>
+                        </thead>
+                        <tbody>
+                            {formData.items?.map((item: any, index: number) => (
+                               <tr key={item.id} className="border-bottom">
+                                  <td className="py-3">
+                                     <SearchableSelect
+                                        options={[
+                                           ...memoizedItemOptions,
+                                           ...(item.description && !masterItems.some(mi => mi.itemName === item.description) 
+                                              ? [{ value: item.description, label: `${item.description} (Legacy)` }] 
+                                              : [])
+                                        ]}
+                                        value={item.description}
+                                        onChange={val => handleItemChange(index, 'description', val)}
+                                        placeholder="Select Item"
+                                        disabled={!!formData.inwardId && !!item.fromInward}
+                                     />
+                                  </td>
+                                  <td className="py-3">
+                                     <SearchableSelect
+                                        options={[
+                                           ...memoizedProcessOptions,
+                                           ...(item.process && !masterProcesses.some(mp => mp.processName === item.process) 
+                                              ? [{ value: item.process, label: `${item.process} (Legacy)` }] 
+                                              : [])
+                                        ]}
+                                        value={String(item.process || '')}
+                                        onChange={val => handleItemChange(index, 'process', val)}
+                                        placeholder="Select Process"
+                                        disabled={!!formData.inwardId && !!item.fromInward}
+                                     />
+                                  </td>
+                                  <td className="py-3 text-center">
+                                     <input 
+                                        type="text" 
+                                        className="form-control bg-transparent p-1 text-center border" 
+                                        placeholder="HSN" 
+                                        value={item.hsnCode || ''} 
+                                        onChange={(e) => handleItemChange(index, 'hsnCode', e.target.value)} 
+                                     />
+                                  </td>
+                                  {formData.inwardId && (
+                                     <td className="py-3 text-center text-muted fw-bold">
+                                        {item.maxQty ?? '-'}
+                                     </td>
+                                  )}
+                                  <td className="py-3">
+                                     {formData.billType === 'Without Process' ? (
+                                        <input type="number" className="form-control bg-transparent p-1 text-center" style={{ width: '60px', margin: '0 auto' }} value={item.wopQty} onWheel={(e) => (e.target as HTMLInputElement).blur()} onChange={e => handleItemChange(index, 'wopQty', e.target.value)} />
+                                     ) : (
+                                        <input type="number" className="form-control bg-transparent p-1 text-center" style={{ width: '60px', margin: '0 auto' }} value={item.quantity} onWheel={(e) => (e.target as HTMLInputElement).blur()} onChange={e => handleItemChange(index, 'quantity', e.target.value)} />
+                                     )}
+                                  </td>
+                                  {formData.billType === 'Both' && (
+                                     <td className="py-3">
+                                        <input type="number" className="form-control bg-transparent p-1 text-center" style={{ width: '85px', margin: '0 auto' }} value={item.wopQty} onWheel={(e) => (e.target as HTMLInputElement).blur()} onChange={e => handleItemChange(index, 'wopQty', e.target.value)} />
+                                     </td>
+                                  )}
+                                  {formData.billType !== 'Without Process' && (
+                                     <>
+                                        <td className="py-3">
+                                           <input type="number" className="form-control bg-transparent p-1 text-end" value={item.unitPrice} onWheel={(e) => (e.target as HTMLInputElement).blur()} onChange={e => handleItemChange(index, 'unitPrice', e.target.value)} />
+                                        </td>
+                                        <td className="py-3 text-end fw-semibold">
+                                           ₹ {((item.amount !== undefined && item.amount !== null && Number(item.amount) > 0) ? Number(item.amount) : ((Number(item.quantity) || 0) * (Number(item.unitPrice) || 0))).toFixed(2)}
+                                        </td>
+                                     </>
+                                  )}
+                                  <td className="py-3 text-center">
+                                     <button type="button" className="btn btn-danger p-1 d-flex align-items-center justify-content-center border-0 shadow-sm" style={{ width: '32px', height: '32px' }} onClick={() => {
+                                        const newItems = formData.items.filter((_: any, i: number) => i !== index);
+                                        setFormData((prev: any) => ({ ...prev, items: newItems }));
+                                     }}>
+                                        <i className="bi bi-x-lg"></i>
+                                     </button>
+                                  </td>
+                               </tr>
+                            ))}
+
+                        </tbody>
+                     </table>
+                     <button type="button" className="btn btn-sm btn-link text-decoration-none mt-2" onClick={() => {
+                        setFormData((prev: any) => ({
+                           ...prev,
+                            items: [...(prev.items || []), { id: Date.now().toString(), description: '', process: '', quantity: 1, wopQty: 0, hsnCode: '', unitPrice: 0, tax: 0, amount: 0, total: 0 }]
+                         }));
+                      }}>+ Add Item</button>
+                   </div>
+
+                   {formData.billType !== 'Without Process' && (
+                      <div className="col-lg-5 ms-auto">
+                         <div className="mt-4 pt-4 border-top">
+                           <div className="d-flex align-items-center justify-content-between mb-4 pb-2" style={{ borderBottom: '1px dashed #dee2e6' }}>
+                              <h6 className="text-muted fw-bold small text-uppercase mb-0">Sub Total</h6>
+                              <div className="d-flex align-items-center gap-2 text-dark fs-5 fw-bold">
+                                 <span>₹</span>
+                                 <span>{formData.subTotal?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                              </div>
+                           </div>
+                           <div className="d-flex align-items-center justify-content-between mb-4 pb-2" style={{ borderBottom: '1px dashed #dee2e6' }}>
+                              <h6 className="text-muted fw-bold small text-uppercase mb-0">(-) Discount</h6>
+                              <div className="d-flex align-items-center justify-content-center text-dark fw-bold fs-5">
+                                 <span className="me-2">₹</span>
+                                 <input
+                                    type="number"
+                                    step="0.01"
+                                    className="form-control bg-light text-end fw-bold p-1 no-spinner"
+                                    style={{ width: '120px' }}
+                                    value={formData.discount}
+                                    placeholder="0.00"
+                                    onWheel={(e) => (e.target as HTMLInputElement).blur()}
+                                    onChange={e => setFormData((prev: any) => ({ ...prev, discount: e.target.value }))}
+                                 />
+                              </div>
+                           </div>
+
+                           <div className="d-flex align-items-center justify-content-between mb-4 pb-2" style={{ borderBottom: '1px dashed #dee2e6' }}>
+                              <div className="d-flex align-items-center">
+                                 <h6 className="text-muted fw-bold small text-uppercase mb-0 me-2">(+) Other Charges</h6>
+                                 <input
+                                    type="text"
+                                    className="form-control form-control-sm bg-light text-muted"
+                                    style={{ width: '150px' }}
+                                    placeholder="Description"
+                                    value={formData.otherChargesDesc || ''}
+                                    onChange={e => setFormData((prev: any) => ({ ...prev, otherChargesDesc: e.target.value }))}
+                                 />
+                              </div>
+                              <div className="d-flex align-items-center justify-content-center text-dark fw-bold fs-5">
+                                 <span className="me-2">₹</span>
+                                 <input
+                                    type="number"
+                                    step="0.01"
+                                    className="form-control bg-light text-end fw-bold p-1 no-spinner"
+                                    style={{ width: '120px' }}
+                                    value={formData.otherCharges}
+                                    placeholder="0.00"
+                                    onWheel={(e) => (e.target as HTMLInputElement).blur()}
+                                    onChange={e => setFormData((prev: any) => ({ ...prev, otherCharges: e.target.value }))}
+                                 />
+                              </div>
+                           </div>
+
+                           {(() => {
+                              const isIntraState = (formData.state || '').toLowerCase().replace(/[^a-z]/g, '') === 'tamilnadu';
+                              const taxRate = formData.taxRate || 0;
+                              const taxTotal = formData.taxTotal || 0;
+
+                              if (isIntraState) {
+                                 return (
+                                    <>
+                                       <div className="d-flex align-items-center justify-content-between mb-3 pb-2" style={{ borderBottom: '1px dashed #dee2e6' }}>
+                                          <h6 className="text-muted fw-bold small text-uppercase mb-0">GST Percentage</h6>
+                                          <div className="d-flex align-items-center gap-1" style={{ width: '80px' }}>
+                                             <input
+                                                type="number"
+                                                className="form-control bg-light text-center fw-bold p-1 no-spinner w-100"
+                                                style={{ fontSize: '14px' }}
+                                                value={formData.taxRate}
+                                                onWheel={(e) => (e.target as HTMLInputElement).blur()}
+                                                onChange={e => setFormData((prev: any) => ({ ...prev, taxRate: e.target.value }))}
+                                             />
+                                             <span className="small fw-bold">%</span>
+                                          </div>
+                                       </div>
+                                       <div className="d-flex align-items-center justify-content-between mb-3 pb-2" style={{ borderBottom: '1px dashed #dee2e6' }}>
+                                          <div className="d-flex align-items-center gap-4">
+                                             <h6 className="text-muted fw-bold small text-uppercase mb-0">(+) CGST</h6>
+                                             <div className="d-flex align-items-center gap-1">
+                                                <span className="small fw-bold text-muted">{taxRate / 2}%</span>
+                                             </div>
+                                          </div>
+                                          <div className="d-flex align-items-center gap-2 text-dark fs-6 fw-bold">
+                                             <span>₹</span>
+                                             <span>{(taxTotal / 2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                                          </div>
+                                       </div>
+                                       <div className="d-flex align-items-center justify-content-between mb-4 pb-2" style={{ borderBottom: '1px dashed #dee2e6' }}>
+                                          <div className="d-flex align-items-center gap-4">
+                                             <h6 className="text-muted fw-bold small text-uppercase mb-0">(+) SGST</h6>
+                                             <div className="d-flex align-items-center gap-1">
+                                                <span className="small fw-bold text-muted">{taxRate / 2}%</span>
+                                             </div>
+                                          </div>
+                                          <div className="d-flex align-items-center gap-2 text-dark fs-6 fw-bold">
+                                             <span>₹</span>
+                                             <span>{(taxTotal / 2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                                          </div>
+                                       </div>
+                                    </>
+                                 );
+                              } else {
+                                 return (
+                                    <div className="d-flex align-items-center justify-content-between mb-4 pb-2" style={{ borderBottom: '1px dashed #dee2e6' }}>
+                                       <div className="d-flex align-items-center gap-4">
+                                          <h6 className="text-muted fw-bold small text-uppercase mb-0">(+) IGST</h6>
+                                          <div className="d-flex align-items-center gap-1" style={{ width: '80px' }}>
+                                             <input
+                                                type="number"
+                                                className="form-control bg-light text-center fw-bold p-1 no-spinner w-100"
+                                                style={{ fontSize: '14px' }}
+                                                value={formData.taxRate}
+                                                onWheel={(e) => (e.target as HTMLInputElement).blur()}
+                                                onChange={e => setFormData((prev: any) => ({ ...prev, taxRate: e.target.value }))}
+                                             />
+                                             <span className="small fw-bold">%</span>
+                                          </div>
+                                       </div>
+                                       <div className="d-flex align-items-center gap-2 text-dark fs-5 fw-bold">
+                                          <span>₹</span>
+                                          <span>{formData.taxTotal?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                                       </div>
+                                    </div>
+                                 );
+                              }
+                           })()}
+
+                           {(() => {
+                              const exactTotal = (formData.subTotal || 0) - (formData.discount || 0) + (Number(formData.otherCharges) || 0) + (formData.taxTotal || 0);
+                              const roundOff = (formData.grandTotal || Math.round(exactTotal)) - exactTotal;
+                              if (Math.abs(roundOff) > 0.005) {
+                                 return (
+                                    <div className="d-flex align-items-center justify-content-between pt-3 pb-2" style={{ borderBottom: '1px dashed #dee2e6' }}>
+                                       <h6 className="text-muted fw-bold small text-uppercase mb-0">Round Off</h6>
+                                       <div className="d-flex align-items-center gap-2 text-dark fs-6 fw-bold">
+                                          <span>₹</span>
+                                          <span>{roundOff > 0 ? '+' : ''}{roundOff.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                       </div>
+                                    </div>
+                                 );
+                              }
+                              return null;
+                           })()}
+
+                           <div className="d-flex align-items-center justify-content-between pt-3 pb-2" style={{ borderBottom: '2.5px solid #212529' }}>
+                              <h4 className="fw-bold mb-0 text-dark text-uppercase small" style={{ letterSpacing: '1px' }}>Grand Total</h4>
+                              <div className="d-flex align-items-center gap-2 text-danger fw-bold fs-2">
+                                 <span>₹</span>
+                                 <span className="text-nowrap">{formData.grandTotal?.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                           </div>
+                        </div>
+                     </div>
+                  )}
+
+                  <div className="d-flex justify-content-center gap-3 mt-5">
+                     <button
+                        type="button"
+                        onClick={handleSubmit}
+                        className="btn btn-primary px-5 py-2 rounded-pill fw-bold shadow-sm d-flex align-items-center gap-2"
+                        disabled={loading || !formData.invoiceNumber}
+                        style={{ minWidth: '150px' }}
+                     >
+                        {loading ? (
+                           <>
+                              <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                              <span>SAVING...</span>
+                           </>
+                        ) : !formData.invoiceNumber ? (
+                           'LOADING...'
+                        ) : (
+                           'SUBMIT'
+                        )}
+                     </button>
+                     <button type="button" className="btn btn-light px-5 py-2 rounded-pill fw-bold border" onClick={() => router.back()}>CANCEL</button>
+                  </div>
+               </form>
+            </div>
+         </div>
+
+         {modal.isOpen && (
+            <FullPageStatus
+               type={modal.type}
+               title={modal.title}
+               message={modal.message}
+               onClose={() => {
+                  setModal(prev => ({ ...prev, isOpen: false }));
+                  if (modal.type === 'success') {
+                     const tab = searchParams.get('tab');
+                     router.push(`/invoices?tab=${tab || 'all'}`);
+                  }
+               }}
+            />
+         )}
+      </>
+
+   );
+};
+
+export default InvoiceForm;

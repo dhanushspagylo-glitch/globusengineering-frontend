@@ -1,0 +1,810 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { useRouter } from 'next/navigation';
+import { RootState } from '@/redux/store';
+import { createInward, updateInward } from '@/redux/features/inwardSlice';
+import { addLedgerEntry } from '@/redux/features/ledgerSlice';
+import { fetchItems, fetchProcesses, createItemThunk, createProcessThunk } from '@/redux/features/masterSlice';
+import { fetchCustomers } from '@/redux/features/customerSlice';
+import { InwardEntry, OutwardEntry } from '@/types/modules';
+import FullPageStatus from '@/components/FullPageStatus';
+import SearchableSelect from '@/components/shared/SearchableSelect';
+import { fetchVendors } from '@/redux/features/vendorSlice';
+import { fetchOutwards } from '@/redux/features/outwardSlice';
+import PageModeIndicator from '@/components/PageModeIndicator';
+import api from '@/lib/axios';
+
+
+
+interface InwardFormProps {
+  initialData?: InwardEntry;
+  mode: 'create' | 'edit' | 'view';
+  initialPartyType?: 'customer' | 'vendor' | null;
+}
+
+const InwardForm: React.FC<InwardFormProps> = ({ initialData, mode, initialPartyType }) => {
+  const dispatch = useDispatch();
+  const router = useRouter();
+  const { items: customers, loading: customersLoading } = useSelector((state: RootState) => state.customers);
+  const { items: vendors } = useSelector((state: RootState) => state.vendors);
+  const { items: outwards } = useSelector((state: RootState) => state.outward);
+  const { user, company: activeCompany } = useSelector((state: RootState) => state.auth);
+  const { items: masterItems, processes: masterProcesses } = useSelector((state: RootState) => state.master);
+  const { token: authToken } = useSelector((state: RootState) => state.auth);
+
+  const [pendingOutwards, setPendingOutwards] = useState<any[]>([]);
+  const [outwardLoading, setOutwardLoading] = useState(false);
+
+  // --- Inline Item Creation State ---
+  const [showCreateItemModal, setShowCreateItemModal] = useState(false);
+  const [newItemName, setNewItemName] = useState('');
+  const [newItemCode, setNewItemCode] = useState('');
+  const [targetItemIndex, setTargetItemIndex] = useState<number | null>(null);
+  const [isCreatingItem, setIsCreatingItem] = useState(false);
+  // ----------------------------------
+
+  // --- Inline Process Creation State ---
+  const [showCreateProcessModal, setShowCreateProcessModal] = useState(false);
+  const [newProcessName, setNewProcessName] = useState('');
+  const [targetProcessIndex, setTargetProcessIndex] = useState<number | null>(null);
+  const [isCreatingProcess, setIsCreatingProcess] = useState(false);
+  // -------------------------------------
+
+  const [isDcNoEditable, setIsDcNoEditable] = useState(false);
+
+  const [formData, setFormData] = useState<Omit<InwardEntry, 'id' | 'createdAt'> & { partyType: 'customer' | 'vendor', outwardId?: string, outwardNo?: string }>({
+    inwardNo: '',
+    partyType: initialPartyType || (initialData?.customerId ? 'customer' : (initialData?.vendorId ? 'vendor' : 'customer')),
+    customerId: '',
+    customerName: '',
+    address: '',
+    vendorId: '',
+    vendorName: '',
+    outwardId: '',
+    outwardNo: '',
+    poReference: '',
+    poDate: '',
+    challanNo: '',
+    dcNo: '',
+    dcDate: '',
+    dueDate: '',
+    vehicleNo: '',
+    company_id: '',
+    date: new Date().toISOString().split('T')[0],
+    status: 'pending',
+    items: [{ description: '', process: '', quantity: 1, unit: 'pcs' }],
+  });
+
+  const [modal, setModal] = useState<{ 
+    isOpen: boolean; 
+    type: 'success' | 'error'; 
+    title: string; 
+    message: string; 
+    confirmLabel?: string;
+    secondaryLabel?: string;
+    onSecondary?: () => void;
+  }>({
+    isOpen: false,
+    type: 'success',
+    title: '',
+    message: '',
+    confirmLabel: 'OK',
+    secondaryLabel: '',
+    onSecondary: undefined
+  });
+
+
+
+  useEffect(() => {
+    if (activeCompany?.id) {
+      if (mode === 'create') {
+        setFormData(prev => ({ 
+          ...prev, 
+          company_id: activeCompany.id,
+          inwardNo: ''
+        }));
+        
+        // Auto-generate DC No for new inwards
+        api.get(`/inward/sequence-dc?companyId=${activeCompany.id}`)
+          .then(res => {
+            if (res.data?.dcNo) {
+              setFormData(prev => ({ ...prev, dcNo: prev.partyType === 'vendor' ? '' : res.data.dcNo }));
+            }
+          })
+          .catch(err => console.error('Failed to auto-generate DC No', err));
+      } else {
+        setFormData(prev => ({ ...prev, company_id: activeCompany.id }));
+      }
+      (dispatch as any)(fetchItems({ company_id: activeCompany.id, limit: 1000 }));
+      (dispatch as any)(fetchProcesses({ company_id: activeCompany.id, limit: 1000 }));
+      (dispatch as any)(fetchCustomers({ company_id: activeCompany.id, limit: 1000 }));
+      (dispatch as any)(fetchVendors({ company_id: activeCompany.id, limit: 1000 }));
+      (dispatch as any)(fetchOutwards({ company_id: activeCompany.id, limit: 1000 }));
+    } else {
+      (dispatch as any)(fetchCustomers({}));
+      (dispatch as any)(fetchVendors({}));
+    }
+  }, [dispatch, activeCompany?.id, mode]);
+
+  useEffect(() => {
+    if (initialData) {
+      setFormData({
+        inwardNo: initialData.inwardNo,
+        partyType: initialData.customerId ? 'customer' : (initialData.vendorId ? 'vendor' : 'customer'),
+        customerId: String(initialData.customerId || ''),
+        customerName: initialData.customerName || '',
+        vendorId: initialData.vendorId || '',
+        vendorName: initialData.vendorName || '',
+        outwardId: (initialData as any).outwardId || '',
+        outwardNo: (initialData as any).outwardNo || '',
+        poReference: initialData.poReference || '',
+        poDate: initialData.poDate || '',
+        challanNo: initialData.challanNo || '',
+        dcNo: initialData.dcNo || '',
+        dcDate: initialData.dcDate || '',
+        dueDate: initialData.dueDate || '',
+        vehicleNo: initialData.vehicleNo || '',
+        company_id: initialData.company_id || '',
+        date: initialData.date,
+        status: initialData.status,
+        items: initialData.items,
+      });
+    }
+  }, [initialData]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    if (name === 'partyType') {
+      setFormData(prev => ({
+        ...prev,
+        partyType: value as 'customer' | 'vendor',
+        customerId: '',
+        customerName: '',
+        vendorId: '',
+        vendorName: '',
+        outwardId: '',
+        outwardNo: '',
+        dcNo: value === 'vendor' ? '' : prev.dcNo,
+        items: [{ description: '', process: '', quantity: 1, unit: 'pcs' }]
+      }));
+      if (value === 'customer' && mode === 'create') {
+        api.get(`/inward/sequence-dc?companyId=${activeCompany?.id}`).then(res => {
+          if (res.data?.dcNo) {
+            setFormData(prev => ({ ...prev, dcNo: res.data.dcNo }));
+          }
+        });
+      }
+    } else if (name === 'customerId') {
+      const customer = customers.find(c => c.id === value);
+      const addressParts = [
+        customer?.street1,
+        customer?.city,
+        customer?.state
+      ].filter(Boolean);
+
+      setFormData(prev => ({
+        ...prev,
+        customerId: value,
+        customerName: customer?.name || '',
+        address: addressParts.join(', ') || ''
+      }));
+    } else if (name === 'vendorId') {
+      const vendor = vendors.find(v => v.id === value);
+      setFormData(prev => ({
+        ...prev,
+        vendorId: value,
+        vendorName: vendor?.name || '',
+        outwardId: '',
+        outwardNo: '',
+        items: [{ description: '', process: '', quantity: 1, unit: 'pcs' }]
+      }));
+      fetchPendingForVendor(value);
+    } else if (name === 'outwardId') {
+      const outward = pendingOutwards.find(o => o.id === value);
+      if (outward) {
+        setFormData(prev => ({
+          ...prev,
+          outwardId: value,
+          outwardNo: outward.outwardNo,
+          dcNo: prev.partyType === 'vendor' ? outward.outwardNo : prev.dcNo,
+          items: outward.items
+            .filter((it: any) => (it.remainingQty !== undefined ? it.remainingQty : it.quantity) > 0)
+            .map((it: any) => ({
+             description: it.description || it.item_name || '',
+             process: it.process || (outward as any).processName || '',
+             quantity: it.remainingQty !== undefined ? it.remainingQty : (it.quantity || 0),
+             unit: it.unit || 'pcs'
+          }))
+        }));
+      } else {
+        setFormData(prev => ({ ...prev, outwardId: '', outwardNo: '' }));
+      }
+    } else {
+      setFormData(prev => ({ ...prev, [name]: value }));
+    }
+  };
+
+  const handleItemChange = (index: number, field: string, value: any) => {
+    const newItems = [...formData.items];
+    newItems[index] = { ...newItems[index], [field]: value };
+    setFormData(prev => ({ ...prev, items: newItems }));
+  };
+
+  const addItem = () => {
+    setFormData(prev => ({
+      ...prev,
+      items: [...prev.items, { description: '', process: '', quantity: 1, unit: 'pcs' }]
+    }));
+  };
+
+  const removeItem = (index: number) => {
+    setFormData(prev => ({
+      ...prev,
+      items: prev.items.filter((_, i) => i !== index)
+    }));
+  };
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    // 1. Validate Party
+    if (!formData.customerId && !formData.vendorId) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Party Required',
+        message: 'Please select a Customer or Vendor.'
+      });
+      return;
+    }
+
+    // 2. Validate DC No
+    if (!formData.dcNo || !String(formData.dcNo).trim()) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'DC Number Required',
+        message: 'Please enter the Inward DC Number.'
+      });
+      return;
+    }
+
+    // 3. Validate Items & Quantities
+    if (!formData.items || formData.items.length === 0) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'No Items Added',
+        message: 'Please add at least one inward item.'
+      });
+      return;
+    }
+
+    for (let i = 0; i < formData.items.length; i++) {
+      const it = formData.items[i];
+      const desc = it.description || (it as any).item_name || `Row #${i + 1}`;
+      if (!it.quantity || Number(it.quantity) <= 0) {
+        setModal({
+          isOpen: true,
+          type: 'error',
+          title: 'Quantity Required',
+          message: `Please enter the received quantity for item "${desc}".`
+        });
+        return;
+      }
+    }
+
+    try {
+      setIsSubmitting(true);
+      const finalData = { ...formData };
+      if (!finalData.company_id && user?.company_id) {
+        finalData.company_id = user.company_id;
+      }
+
+      if (mode === 'create') {
+        const result = await (dispatch as any)(createInward(finalData)).unwrap();
+        setModal({
+          isOpen: true,
+          type: 'success',
+          title: 'Success!',
+          message: "Inward entry created successfully.",
+          confirmLabel: 'OK'
+        });
+      } else {
+        await (dispatch as any)(updateInward({ ...initialData!, ...finalData })).unwrap();
+        setModal({
+          isOpen: true,
+          type: 'success',
+          title: 'Success!',
+          message: "Inward entry updated successfully."
+        });
+      }
+
+    } catch (err: any) {
+
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Error',
+        message: err.message || 'Failed to save inward entry. Please try again.'
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const fetchPendingForVendor = async (vId: string) => {
+    if (!vId) {
+      setPendingOutwards([]);
+      return;
+    }
+    setOutwardLoading(true);
+    const activeToken = authToken || localStorage.getItem('token');
+    if (activeToken) {
+      try {
+        const res = await fetch(`/api/outward/pending/${vId}`, {
+          headers: {
+            'Authorization': `Bearer ${activeToken.replace(/^"|"$/g, '')}`
+          }
+        });
+        const data = await res.json();
+        setPendingOutwards(Array.isArray(data) ? data : []);
+      } catch (err) {
+        console.error('Failed to fetch pending outwards:', err);
+      } finally {
+        setOutwardLoading(false);
+      }
+    }
+  };
+
+  const fillMockData = () => {
+    setFormData(prev => ({
+      ...prev,
+      customerId: customers[0]?.id || '',
+      customerName: customers[0]?.company || customers[0]?.name || '',
+      poReference: '40125263002803',
+      poDate: new Date().toISOString().split('T')[0],
+      dcNo: '4126700808',
+      dcDate: new Date().toISOString().split('T')[0],
+      date: new Date().toISOString().split('T')[0],
+      items: [{ description: 'Raw Material', process: 'Machining', quantity: 15, unit: 'pcs' }]
+    }));
+  };
+
+   return (
+
+    <>
+      <div className="card border-0 shadow-sm bg-white pb-5">
+        <div className="card-body p-4 p-md-5">
+          <form onSubmit={handleSubmit}>
+  
+            <div className="d-flex justify-content-between align-items-center mb-5 pb-3 border-bottom">
+               <h4 className="m-0 text-dark fw-bold">
+                 {formData.partyType === 'vendor' ? 'Job Work Return (from Vendor)' : 'Inward Entry'}
+               </h4>
+            </div>
+  
+            <div className="row g-4 mb-5 align-items-center">
+              {mode === 'create' && !initialPartyType && (
+                <div className="col-md-6 d-flex">
+                  <label className="form-label mb-0 align-self-center text-muted col-3">Party Type</label>
+                  <div className="flex-grow-1 d-flex gap-4">
+                    <div className="form-check">
+                      <input className="form-check-input" type="radio" name="partyType" id="partyCustomer" value="customer" checked={formData.partyType === 'customer'} onChange={handleChange} />
+                      <label className="form-check-label small fw-bold text-muted" htmlFor="partyCustomer">CUSTOMER</label>
+                    </div>
+                    <div className="form-check">
+                      <input className="form-check-input" type="radio" name="partyType" id="partyVendor" value="vendor" checked={formData.partyType === 'vendor'} onChange={handleChange} />
+                      <label className="form-check-label small fw-bold text-muted" htmlFor="partyVendor">VENDOR (JOB WORK)</label>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div className="col-md-6 d-flex">
+                <label className="form-label mb-0 align-self-center text-muted col-3">Date <span className="text-danger">*</span></label>
+
+                <input type="date" className="form-control border-bottom rounded-0 px-2 shadow-none" name="date" value={formData.date} onChange={handleChange} required disabled={mode === 'view'} />
+              </div>
+
+              {formData.partyType === 'customer' ? (
+                <div className="col-md-6 d-flex">
+                  <label className="form-label mb-0 align-self-center text-muted col-3">Customer</label>
+
+                  <SearchableSelect
+                    className="flex-grow-1"
+                    options={customers.map(c => ({ value: c.id, label: c.company || c.name }))}
+                    value={formData.customerId || ''}
+                    onChange={(val) => handleChange({ target: { name: 'customerId', value: val } } as any)}
+                    placeholder={customersLoading ? 'Loading Customers...' : 'Choose Customer'}
+                    disabled={mode === 'view'}
+                  />
+                </div>
+              ) : (
+                <div className="col-md-6 d-flex">
+                  <label className="form-label mb-0 align-self-center text-muted col-3">Vendor</label>
+
+                  <SearchableSelect
+                    className="flex-grow-1"
+                    options={vendors.map(v => ({ value: v.id, label: v.name }))}
+                    value={formData.vendorId || ''}
+                    onChange={(val) => handleChange({ target: { name: 'vendorId', value: val } } as any)}
+                    placeholder="Choose Vendor"
+                    disabled={mode === 'view'}
+                  />
+                </div>
+              )}
+  
+              <div className="col-md-6 d-flex">
+                <label className="form-label mb-0 align-self-center text-muted col-3">Po No</label>
+                <input type="text" className="form-control border-bottom rounded-0 px-2 shadow-none" name="poReference" value={formData.poReference} onChange={handleChange} placeholder="Po No" disabled={mode === 'view'} />
+              </div>
+
+              <div className="col-md-6 d-flex">
+                <label className="form-label mb-0 align-self-center text-muted col-3">Po Date</label>
+                <input type="date" className="form-control border-bottom rounded-0 px-2 shadow-none" name="poDate" value={formData.poDate} onChange={handleChange} disabled={mode === 'view'} />
+              </div>
+  
+              <div className="col-md-6 d-flex">
+                <label className="form-label mb-0 align-self-center text-muted col-3">Dc No</label>
+                <div className="flex-grow-1 position-relative">
+                  <input 
+                    type="text" 
+                    className={`form-control border-bottom rounded-0 px-2 shadow-none ${!isDcNoEditable && mode !== 'view' ? 'bg-light text-muted' : ''}`} 
+                    style={{ paddingRight: !isDcNoEditable && mode !== 'view' ? '65px' : '10px' }}
+                    name="dcNo" 
+                    value={formData.dcNo} 
+                    onChange={handleChange} 
+                    placeholder="Dc No" 
+                    readOnly={mode === 'view' || !isDcNoEditable} 
+                  />
+                  {mode !== 'view' && !isDcNoEditable && (
+                    <span 
+                      className="badge bg-secondary bg-opacity-75 position-absolute d-flex align-items-center" 
+                      style={{ right: '8px', top: '50%', transform: 'translateY(-50%)', cursor: 'pointer', letterSpacing: '0.5px' }}
+                      onClick={() => setIsDcNoEditable(true)}
+                      title="Click to override auto-generated DC No"
+                    >
+                      <i className="bi bi-pencil-square me-1"></i> EDIT
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="col-md-6 d-flex">
+                <label className="form-label mb-0 align-self-center text-muted col-3">Dc Date</label>
+                <input type="date" className="form-control border-bottom rounded-0 px-2 shadow-none" name="dcDate" value={formData.dcDate} onChange={handleChange} disabled={mode === 'view'} />
+              </div>
+
+              <div className="col-md-6 d-flex">
+                <label className="form-label mb-0 align-self-center text-muted col-3">Vehicle No</label>
+                <input type="text" className="form-control border-bottom rounded-0 px-2 shadow-none" name="vehicleNo" value={formData.vehicleNo} onChange={handleChange} placeholder="Vehicle No" disabled={mode === 'view'} />
+              </div>
+
+              {formData.partyType === 'vendor' && (
+                <div className="col-md-6 d-flex">
+                  <label className="form-label mb-0 align-self-center text-muted fw-bold col-3">OUTWARD REF</label>
+                  <SearchableSelect
+                    className="flex-grow-1"
+                    options={[
+                      ...pendingOutwards
+                        .filter(o => (o.totalRemaining || 0) > 0)
+                        .map(o => ({ 
+                          value: o.id, 
+                          label: `${o.outwardNo} (${o.date ? new Date(o.date).toLocaleDateString() : 'N/A'}) - ${o.totalRemaining || 0} Units Pending`,
+                          displayLabel: o.outwardNo
+                        })),
+                      ...(formData.outwardId && !pendingOutwards.some(o => String(o.id) === String(formData.outwardId) && (o.totalRemaining || 0) > 0)
+                        ? [{
+                            value: formData.outwardId,
+                            label: formData.outwardNo ? formData.outwardNo : 'Linked Outward',
+                            displayLabel: formData.outwardNo ? formData.outwardNo : 'Linked Outward'
+                          }]
+                        : [])
+                    ]}
+                    value={formData.outwardId || ''}
+                    onChange={(val) => handleChange({ target: { name: 'outwardId', value: val } } as any)}
+                    placeholder={outwardLoading ? 'Loading Pending Dispatches...' : (pendingOutwards.length === 0 ? 'No Pending Dispatches' : 'Select Vendor Challan Reference…')}
+                    disabled={mode === 'view'}
+                  />
+                  {outwardLoading && <div className="spinner-border spinner-border-sm text-primary ms-2 align-self-center" role="status"></div>}
+                </div>
+              )}
+            </div>
+  
+            <div className="mt-5 border-top pt-4 border-bottom pb-4 mb-4">
+              <div className="row g-2 mb-3 fw-bold text-muted small">
+                <div className="col-md-4">Item</div>
+                <div className="col-md-3">Process</div>
+                <div className="col-md-4 text-center">Original Qty</div>
+                {mode !== 'view' && <div className="col-md-1 text-center">Action</div>}
+              </div>
+  
+              {formData.items.map((item, index) => (
+                <div className="row g-2 mb-3 align-items-center" key={index}>
+                  <div className="col-md-4">
+                    <SearchableSelect
+                      options={[
+                        ...masterItems.map(mi => ({ value: mi.itemName, label: `${mi.itemName} (${mi.itemCode})` })),
+                        ...(item.description && !masterItems.some(mi => mi.itemName === item.description) 
+                          ? [{ value: item.description, label: `${item.description} (Legacy)` }] 
+                          : [])
+                      ]}
+                      value={item.description || ''}
+                      onChange={(val) => handleItemChange(index, 'description', val)}
+                      onCreateNew={(term) => {
+                        setNewItemName(term);
+                        setTargetItemIndex(index);
+                        setShowCreateItemModal(true);
+                      }}
+                      placeholder="Select Item"
+                      disabled={mode === 'view'}
+                    />
+                  </div>
+                  <div className="col-md-3">
+                    <SearchableSelect
+                      options={[
+                        ...masterProcesses.map(mp => ({ value: mp.processName, label: mp.processName })),
+                        ...(item.process && !masterProcesses.some(mp => mp.processName === item.process) 
+                          ? [{ value: item.process, label: `${item.process} (Legacy)` }] 
+                          : [])
+                      ]}
+                      value={item.process || ''}
+                      onChange={(val) => handleItemChange(index, 'process', val)}
+                      onCreateNew={(term) => {
+                        setNewProcessName(term);
+                        setTargetProcessIndex(index);
+                        setShowCreateProcessModal(true);
+                      }}
+                      placeholder="Select Process"
+                      disabled={mode === 'view'}
+                    />
+                  </div>
+                  <div className="col-md-4">
+                    <input type="number" className="form-control border-bottom rounded-0 px-2 shadow-none text-center" value={item.quantity} onWheel={(e) => (e.target as HTMLInputElement).blur()} onChange={e => handleItemChange(index, 'quantity', e.target.value)} disabled={mode === 'view'} />
+                  </div>
+                  <div className="col-md-1 text-center">
+                    {mode !== 'view' && (
+                      <button type="button" className="btn btn-link text-danger p-0 border-0 fs-5 text-decoration-none shadow-none" onClick={() => removeItem(index)} disabled={formData.items.length === 1}>
+                        <i className="bi bi-x"></i>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+  
+              {mode !== 'view' && (
+                <div className="text-end mt-4">
+                  <button type="button" className="btn btn-link text-success text-decoration-none fw-semibold p-0 shadow-none" onClick={addItem}>
+                    <i className="bi bi-plus fs-5 align-middle"></i> Add New Row
+                  </button>
+                </div>
+              )}
+            </div>
+  
+            <div className="mt-5 d-flex justify-content-end gap-2">
+              {mode !== 'view' && (
+                <>
+                  <button type="button" className="btn px-5 py-2 rounded-pill fw-bold text-white" style={{ backgroundColor: '#475569', border: 'none' }} onClick={() => {
+                    if (mode === 'edit' && initialData) {
+                      setFormData({
+                        inwardNo: initialData.inwardNo,
+                        partyType: initialData.customerId ? 'customer' : (initialData.vendorId ? 'vendor' : 'customer'),
+                        customerId: String(initialData.customerId || ''),
+                        customerName: initialData.customerName || '',
+                        vendorId: initialData.vendorId || '',
+                        vendorName: initialData.vendorName || '',
+                        outwardId: (initialData as any).outwardId || '',
+                        outwardNo: (initialData as any).outwardNo || '',
+                        poReference: initialData.poReference || '',
+                        poDate: initialData.poDate || '',
+                        challanNo: initialData.challanNo || '',
+                        dcNo: initialData.dcNo || '',
+                        dcDate: initialData.dcDate || '',
+                        dueDate: initialData.dueDate || '',
+                        vehicleNo: initialData.vehicleNo || '',
+                        company_id: initialData.company_id || '',
+                        date: initialData.date,
+                        status: initialData.status,
+                        items: initialData.items,
+                      } as any);
+                    } else {
+                      setFormData({ ...formData, poReference: '', dcNo: '', poDate: '', dcDate: '', items: [{ description: '', process: '', quantity: 1, unit: 'pcs' }] } as any);
+                    }
+                  }}>CLEAR</button>
+                  <button
+                    type="submit"
+                    className="btn btn-primary px-5 py-2 rounded-pill fw-bold shadow-sm d-flex align-items-center gap-2"
+                    disabled={isSubmitting}
+                    style={{ backgroundColor: 'var(--accent-color)', border: 'none', minWidth: '150px' }}
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                        <span>SUBMITTING...</span>
+                      </>
+                    ) : (
+                      mode === 'create' ? 'SUBMIT' : 'UPDATE'
+                    )}
+                  </button>
+                </>
+              )}
+              {mode === 'view' && (
+                 <button type="button" className="btn btn-secondary px-4 rounded-1" onClick={() => router.push(`/inward?type=${formData.partyType}`)}>BACK</button>
+              )}
+            </div>
+          </form>
+        </div>
+  
+        {modal.isOpen && (
+          <FullPageStatus
+            type={modal.type}
+            title={modal.title}
+            message={modal.message}
+            buttonLabel={modal.confirmLabel}
+            secondaryButtonLabel={modal.secondaryLabel}
+            onSecondaryAction={modal.onSecondary}
+            onClose={() => {
+              setModal(prev => ({ ...prev, isOpen: false }));
+              if (modal.type === 'success') router.push(`/inward?type=${formData.partyType}`);
+            }}
+          />
+        )}
+
+      </div>
+
+      {showCreateItemModal && (
+         <>
+           <div className="modal-backdrop fade show" style={{ zIndex: 9998, backgroundColor: 'rgba(0,0,0,0.6)' }}></div>
+           <div className="modal fade show d-block" tabIndex={-1} style={{ zIndex: 9999 }} onClick={() => setShowCreateItemModal(false)}>
+             <div className="modal-dialog modal-dialog-centered modal-lg" onClick={e => e.stopPropagation()}>
+               <div className="modal-content bg-white rounded-4 border-0 shadow-lg p-4">
+                 <div className="modal-header border-bottom-0 px-4 pt-4 pb-2">
+                   <h3 className="modal-title fw-bold text-dark d-flex align-items-center gap-3">
+                     <i className="bi bi-box-seam text-primary fs-2"></i> Create New Item
+                   </h3>
+                   <button type="button" className="btn-close shadow-none fs-5" onClick={() => setShowCreateItemModal(false)}></button>
+                 </div>
+                 <div className="modal-body px-4 py-4">
+                   <div className="mb-5">
+                     <label className="form-label text-muted fw-bold small mb-2 text-uppercase letter-spacing-1">Item Name <span className="text-danger">*</span></label>
+                     <input 
+                       type="text" 
+                       className="form-control form-control-lg shadow-none fs-5 bg-light border-0 py-3 px-4 rounded-3" 
+                       value={newItemName} 
+                       onChange={(e) => setNewItemName(e.target.value)}
+                       placeholder="E.g. Titanium Gear"
+                     />
+                   </div>
+                   <div className="mb-2">
+                     <label className="form-label text-muted fw-bold small mb-2 text-uppercase letter-spacing-1">Item Code <span className="fw-normal text-lowercase">(Optional)</span></label>
+                     <input 
+                       type="text" 
+                       className="form-control form-control-lg shadow-none fs-5 bg-light border-0 py-3 px-4 rounded-3" 
+                       value={newItemCode} 
+                       onChange={(e) => setNewItemCode(e.target.value)}
+                       placeholder="E.g. TG-001"
+                     />
+                   </div>
+                 </div>
+                 <div className="modal-footer border-top-0 px-4 pb-4 pt-3 gap-3 d-flex justify-content-end">
+                   <button type="button" className="btn btn-light btn-lg rounded-3 px-5 py-3 fw-bold text-muted border-0" onClick={() => setShowCreateItemModal(false)}>Cancel</button>
+                   <button 
+                     type="button" 
+                     className="btn btn-primary btn-lg rounded-3 px-5 py-3 fw-bold shadow-sm" 
+                     disabled={isCreatingItem || !newItemName.trim()}
+                     onClick={async () => {
+                        try {
+                           setIsCreatingItem(true);
+                           const payload = {
+                             itemName: newItemName.trim(),
+                             itemCode: newItemCode.trim(),
+                             company_id: activeCompany?.id || formData.company_id
+                           };
+                           const res = await (dispatch as any)(createItemThunk(payload)).unwrap();
+                           
+                           if (targetItemIndex !== null) {
+                              handleItemChange(targetItemIndex, 'description', res.itemName || payload.itemName);
+                           }
+                           setShowCreateItemModal(false);
+                           setNewItemCode('');
+                        } catch (err: any) {
+                           alert(err.message || 'Failed to create item');
+                        } finally {
+                           setIsCreatingItem(false);
+                        }
+                     }}
+                   >
+                     {isCreatingItem ? 'Saving...' : 'Save Item'}
+                   </button>
+                 </div>
+               </div>
+             </div>
+           </div>
+         </>
+      )}
+
+      {showCreateProcessModal && (
+         <>
+           <div className="modal-backdrop fade show" style={{ zIndex: 9998, backgroundColor: 'rgba(0,0,0,0.6)' }}></div>
+           <div className="modal fade show d-block" tabIndex={-1} style={{ zIndex: 9999 }} onClick={() => setShowCreateProcessModal(false)}>
+             <div className="modal-dialog modal-dialog-centered modal-lg" onClick={e => e.stopPropagation()}>
+               <div className="modal-content bg-white rounded-4 border-0 shadow-lg p-4">
+                 <div className="modal-header border-bottom-0 px-4 pt-4 pb-2">
+                   <h3 className="modal-title fw-bold text-dark d-flex align-items-center gap-3">
+                     <i className="bi bi-gear-fill text-primary fs-2"></i> Create New Process
+                   </h3>
+                   <button type="button" className="btn-close shadow-none fs-5" onClick={() => setShowCreateProcessModal(false)}></button>
+                 </div>
+                 <div className="modal-body px-4 py-4">
+                   <div className="mb-2">
+                     <label className="form-label text-muted fw-bold small mb-2 text-uppercase letter-spacing-1">Process Name <span className="text-danger">*</span></label>
+                     <input 
+                       type="text" 
+                       className="form-control form-control-lg shadow-none fs-5 bg-light border-0 py-3 px-4 rounded-3" 
+                       value={newProcessName} 
+                       onChange={(e) => setNewProcessName(e.target.value)}
+                       placeholder="E.g. Powder Coating"
+                     />
+                   </div>
+                 </div>
+                 <div className="modal-footer border-top-0 px-4 pb-4 pt-3 gap-3 d-flex justify-content-end">
+                   <button type="button" className="btn btn-light btn-lg rounded-3 px-5 py-3 fw-bold text-muted border-0" onClick={() => setShowCreateProcessModal(false)}>Cancel</button>
+                   <button 
+                     type="button" 
+                     className="btn btn-primary btn-lg rounded-3 px-5 py-3 fw-bold shadow-sm" 
+                     disabled={isCreatingProcess || !newProcessName.trim()}
+                     onClick={async () => {
+                        try {
+                           setIsCreatingProcess(true);
+                           const payload = {
+                             processName: newProcessName.trim(),
+                             company_id: activeCompany?.id || formData.company_id
+                           };
+                           const res = await (dispatch as any)(createProcessThunk(payload)).unwrap();
+                           
+                           if (targetProcessIndex !== null) {
+                              handleItemChange(targetProcessIndex, 'process', res.processName || payload.processName);
+                           }
+                           setShowCreateProcessModal(false);
+                        } catch (err: any) {
+                           alert(err.message || 'Failed to create process');
+                        } finally {
+                           setIsCreatingProcess(false);
+                        }
+                     }}
+                   >
+                     {isCreatingProcess ? 'Saving...' : 'Save Process'}
+                   </button>
+                 </div>
+               </div>
+             </div>
+           </div>
+         </>
+      )}
+
+      <style jsx>{`
+          .form-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+          }
+          .form-control, .form-select {
+            font-size: 0.85rem;
+            height: 38px;
+            padding-top: 0;
+            padding-bottom: 0;
+          }
+          .card-body {
+            padding-top: 2rem !important;
+          }
+      `}</style>
+    </>
+  );
+};
+
+export default InwardForm;

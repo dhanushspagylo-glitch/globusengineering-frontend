@@ -1,0 +1,440 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { useRouter } from 'next/navigation';
+import { RootState } from '@/redux/store';
+import { createCustomer, updateCustomer } from '@/redux/features/customerSlice';
+import { createLeadSync, deleteLeadSync } from '@/redux/features/leadSlice';
+import { Customer } from '@/types/modules';
+import FullPageStatus from '@/components/FullPageStatus';
+import StateSelect from '@/components/shared/StateSelect';
+
+
+interface CustomerFormProps {
+  initialData?: Customer;
+  mode: 'create' | 'edit' | 'view';
+}
+
+const CustomerForm: React.FC<CustomerFormProps> = ({ initialData, mode }) => {
+  const { user, company: activeCompany } = useSelector((state: RootState) => state.auth);
+  const dispatch = useDispatch();
+  const router = useRouter();
+  const initializedIdRef = React.useRef<string | null>(null);
+
+  const [formData, setFormData] = useState({
+    customerType: 'Customer',
+    name: '',
+    company: '',
+    email: '',
+    phone: '',
+    industry: 'Automotive',
+    status: 'lead' as Customer['status'],
+    agentId: '',
+    street1: '',
+    street2: '',
+    city: '',
+    area: '',
+    state: '',
+    stateCode: '',
+    pinCode: '',
+    contactPerson1: '',
+    designation1: '',
+    emailId1: '',
+    phoneNumber1: '',
+    contactPerson2: '',
+    designation2: '',
+    emailId2: '',
+    phoneNumber2: '',
+    contactPerson3: '',
+    designation3: '',
+    emailId3: '',
+    phoneNumber3: '',
+    landline: '',
+    fax: '',
+    gst: '',
+    tin: '',
+    cst: '',
+    tc: '',
+    vmc: '',
+    hmc: '',
+    paymentTerms: '',
+    company_id: ''
+  });
+
+  useEffect(() => {
+    if (initialData && initializedIdRef.current !== initialData.id) {
+      initializedIdRef.current = initialData.id;
+      setFormData({
+        customerType: initialData.customerType || 'Customer',
+        name: initialData.name || '',
+        company: initialData.company || '',
+        email: initialData.email || '',
+        phone: initialData.phone || '',
+        industry: initialData.industry || 'Automotive',
+        status: (initialData.status as Customer['status']) || 'active',
+        agentId: initialData.agentId || '',
+        street1: initialData.street1 || '',
+        street2: initialData.street2 || '',
+        city: initialData.city || '',
+        area: initialData.area || '',
+        state: initialData.state || '',
+        stateCode: initialData.stateCode || '',
+        pinCode: initialData.pinCode != null ? String(initialData.pinCode) : '',
+        contactPerson1: initialData.contactPerson1 || '',
+        designation1: initialData.designation1 || '',
+        emailId1: initialData.emailId1 || '',
+        phoneNumber1: initialData.phoneNumber1 || '',
+        contactPerson2: initialData.contactPerson2 || '',
+        designation2: initialData.designation2 || '',
+        emailId2: initialData.emailId2 || '',
+        phoneNumber2: initialData.phoneNumber2 || '',
+        contactPerson3: initialData.contactPerson3 || '',
+        designation3: initialData.designation3 || '',
+        emailId3: initialData.emailId3 || '',
+        phoneNumber3: initialData.phoneNumber3 || '',
+        landline: initialData.landline != null ? String(initialData.landline) : '',
+        fax: initialData.fax || '',
+        gst: initialData.gst || '',
+        tin: initialData.tin || '',
+        cst: initialData.cst || '',
+        tc: initialData.tc != null ? String(initialData.tc) : '',
+        vmc: initialData.vmc != null ? String(initialData.vmc) : '',
+        hmc: initialData.hmc != null ? String(initialData.hmc) : '',
+        paymentTerms: initialData.paymentTerms || '',
+        company_id: initialData.company_id || ''
+      });
+    }
+  }, [initialData]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    
+    // Auto-lowercase email fields
+    if (name.toLowerCase().includes('email')) {
+      setFormData(prev => ({ ...prev, [name]: value.toLowerCase() }));
+    } else {
+      setFormData(prev => ({ ...prev, [name]: value }));
+    }
+  };
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const [modal, setModal] = useState<{
+    isOpen: boolean;
+    type: 'success' | 'error';
+    title: string;
+    message: string;
+  }>({ isOpen: false, type: 'success', title: '', message: '' });
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!formData.name && !formData.company) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Customer Name Required',
+        message: 'Please enter the Customer Name or Company Name.'
+      });
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      const finalData = { ...formData };
+      const sessionCompanyId = activeCompany?.id || user?.company_id || (user as any)?.companyId;
+
+      if (!finalData.company_id && sessionCompanyId) {
+        finalData.company_id = sessionCompanyId;
+      }
+
+      // If a sales agent creates a customer, auto-assign it to them
+      if (mode === 'create' && (user?.role === 'sales_agent' || user?.role === 'sales')) {
+        finalData.agentId = user.id;
+      }
+
+      if (mode === 'create') {
+        const resultAction = await (dispatch as any)(createCustomer(finalData));
+        if (createCustomer.fulfilled.match(resultAction)) {
+          const createdCustomer = resultAction.payload;
+          if (String(finalData.status || '').toLowerCase() === 'lead') {
+            await (dispatch as any)(createLeadSync({
+              id: createdCustomer?.id ? `cust_${createdCustomer.id}` : undefined,
+              name: finalData.contactPerson1 || finalData.name || 'Prospect',
+              company: finalData.company || finalData.name || 'Company',
+              email: finalData.email || finalData.emailId1 || '',
+              phone: finalData.phone || finalData.phoneNumber1 || '-',
+              industry: finalData.industry || 'Automotive',
+              source: 'Web',
+              status: 'new',
+              agentId: finalData.agentId || user?.id || '',
+              company_id: finalData.company_id || sessionCompanyId || undefined,
+              assignedArea: finalData.area || finalData.city || '',
+              notes: ''
+            } as any));
+          }
+          setModal({
+            isOpen: true,
+            type: 'success',
+            title: 'Success!',
+            message: "Customer profile registered successfully."
+          });
+        } else {
+          const errMsg = (resultAction.payload as string) || (resultAction.error?.message) || 'Failed to register customer';
+          setModal({
+            isOpen: true,
+            type: 'error',
+            title: 'Error',
+            message: errMsg
+          });
+        }
+      } else {
+        const payloadToUpdate = {
+          ...initialData,
+          ...finalData,
+          id: String(initialData?.id || ''),
+          createdAt: initialData?.createdAt || ''
+        };
+        const resultAction = await (dispatch as any)(updateCustomer(payloadToUpdate));
+        if (updateCustomer.fulfilled.match(resultAction)) {
+          if (initialData?.id) {
+            if (String(finalData.status || '').toLowerCase() === 'lead') {
+              await (dispatch as any)(createLeadSync({
+                id: `cust_${initialData.id}`,
+                name: finalData.contactPerson1 || finalData.name || 'Prospect',
+                company: finalData.company || finalData.name || 'Company',
+                email: finalData.email || finalData.emailId1 || '',
+                phone: finalData.phone || finalData.phoneNumber1 || '-',
+                industry: finalData.industry || 'Automotive',
+                source: 'Web',
+                status: 'new',
+                agentId: finalData.agentId || user?.id || '',
+                company_id: finalData.company_id || sessionCompanyId || undefined,
+                assignedArea: finalData.area || finalData.city || '',
+                notes: ''
+              } as any));
+            } else if (String(initialData.status || '').toLowerCase() === 'lead') {
+              await (dispatch as any)(deleteLeadSync(`cust_${initialData.id}`));
+            }
+          }
+          setModal({
+            isOpen: true,
+            type: 'success',
+            title: 'Success!',
+            message: "Customer profile updated successfully."
+          });
+        } else {
+          const errMsg = (resultAction.payload as string) || (resultAction.error?.message) || 'Failed to update customer';
+          setModal({
+            isOpen: true,
+            type: 'error',
+            title: 'Error',
+            message: errMsg
+          });
+        }
+      }
+
+    } catch (err: any) {
+      console.error('Failed to save customer:', err);
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Error',
+        message: err?.message || 'Failed to save customer'
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const renderInput = (label: string, name: keyof typeof formData, type = 'text', required = false) => (
+    <div className="col-md-6 mb-3">
+      <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">
+        {label}
+      </label>
+
+      <input
+        type={type}
+        className="form-control"
+        name={name}
+        value={formData[name] ?? ''}
+        onChange={handleChange}
+        placeholder={label}
+        required={required}
+        disabled={mode === 'view'}
+      />
+    </div>
+  );
+
+   return (
+
+    <>
+      <div className="card border-0 shadow-sm">
+        <div className="card-body p-4">
+          <form onSubmit={handleSubmit}>
+            
+            <div className="d-flex justify-content-between align-items-center mb-4 border-bottom pb-2">
+              <h5 className="text-primary mb-0 fw-bold" style={{ fontSize: '1rem' }}>BASIC DETAILS</h5>
+            </div>
+            <div className="row g-3 mb-4">
+              <div className="col-md-6 mb-3">
+                <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">Customer Type</label>
+                <select className="form-select" name="customerType" value={formData.customerType} onChange={handleChange} disabled={mode === 'view'}>
+                  <option value="Customer">Customer</option>
+                  <option value="Dealer">Dealer</option>
+                  <option value="Distributor">Distributor</option>
+                </select>
+              </div>
+              {renderInput('Customer Name', 'name', 'text')}
+              {renderInput('Company Name', 'company', 'text')}
+              {renderInput('Email Address', 'email', 'text')}
+              {renderInput('Phone Number', 'phone', 'text')}
+              {renderInput('Industry', 'industry', 'text')}
+
+              <div className="col-md-6 mb-3">
+                <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">Status</label>
+                <select className="form-select" name="status" value={formData.status} onChange={handleChange} disabled={mode === 'view'}>
+                  <option value="active">Active</option>
+                  <option value="lead">Lead</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </div>
+              {(mode === 'edit' || mode === 'view') && initialData?.createdAt && (
+                <div className="col-md-6 mb-3">
+                  <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">Created On</label>
+                  <input type="text" className="form-control" value={new Date(initialData.createdAt).toLocaleString()} disabled />
+                </div>
+              )}
+            </div>
+  
+            <h5 className="mb-4 text-primary border-bottom pb-2 fw-bold" style={{ fontSize: '1rem' }}>ADDRESS DETAILS</h5>
+            <div className="row g-3 mb-4">
+              {renderInput('Street 1', 'street1', 'text')}
+              {renderInput('Street 2', 'street2')}
+              {renderInput('City', 'city', 'text')}
+              {renderInput('Area', 'area')}
+              <div className="col-md-6 mb-3">
+                <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">State</label>
+                <StateSelect
+                  value={formData.state}
+                  onChange={(name, code) => setFormData(prev => ({ ...prev, state: name, stateCode: code }))}
+                  disabled={mode === 'view'}
+                />
+              </div>
+              <div className="col-md-6 mb-3">
+                <label className="form-label fw-bold x-small text-muted text-uppercase tracking-wider">State Code</label>
+                <input
+                  type="text"
+                  className="form-control bg-light"
+                  value={formData.stateCode}
+                  readOnly
+                  placeholder="Auto-filled"
+                  style={{ cursor: 'not-allowed' }}
+                />
+              </div>
+              {renderInput('Pin code', 'pinCode', 'text')}
+
+            </div>
+
+  
+            <h5 className="mb-4 text-primary border-bottom pb-2 fw-bold" style={{ fontSize: '1rem' }}>CONTACT PERSONS</h5>
+            <div className="row g-3 mb-4">
+              {renderInput('Contact Person 1', 'contactPerson1', 'text')}
+              {renderInput('Designation 1', 'designation1', 'text')}
+              {renderInput('Email Id 1', 'emailId1', 'email')}
+              {renderInput('Phone Number 1', 'phoneNumber1', 'text')}
+              
+              {renderInput('Contact Person 2', 'contactPerson2')}
+              {renderInput('Designation 2', 'designation2')}
+              {renderInput('Email Id 2', 'emailId2', 'text')}
+              {renderInput('Phone Number 2', 'phoneNumber2')}
+              
+              {renderInput('Contact Person 3', 'contactPerson3')}
+              {renderInput('Designation 3', 'designation3')}
+              {renderInput('Email Id 3', 'emailId3', 'text')}
+              {renderInput('Phone Number 3', 'phoneNumber3')}
+              
+              {renderInput('Landline', 'landline')}
+              {renderInput('Fax', 'fax')}
+            </div>
+  
+            <h5 className="mb-4 text-primary border-bottom pb-2 fw-bold" style={{ fontSize: '1rem' }}>TAX DETAILS</h5>
+            <div className="row g-3 mb-4">
+              {renderInput('GST', 'gst', 'text')}
+              {renderInput('TIN', 'tin', 'text')}
+              {renderInput('CST', 'cst', 'text')}
+            </div>
+
+  
+            <h5 className="mb-4 text-primary border-bottom pb-2 fw-bold" style={{ fontSize: '1rem' }}>MACHINE DETAILS</h5>
+            <div className="row g-3 mb-4">
+              {renderInput('T/C', 'tc')}
+              {renderInput('VMC', 'vmc')}
+              {renderInput('HMC', 'hmc')}
+              {renderInput('Payment Terms', 'paymentTerms', 'text')}
+            </div>
+  
+            <div className="mt-5 pt-4 border-top d-flex gap-3">
+              {mode !== 'view' ? (
+                <>
+                  <button 
+                    type="submit" 
+                    className="btn btn-primary px-4 shadow-accent fw-bold rounded-pill d-flex align-items-center gap-2"
+                    disabled={isSubmitting}
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                        <span>{mode === 'create' ? 'Registering...' : 'Updating...'}</span>
+                      </>
+                    ) : (
+                      mode === 'create' ? 'Register Customer' : 'Update Profile'
+                    )}
+                  </button>
+                  <button 
+                    type="button" 
+                    className="btn btn-outline-secondary px-4 fw-bold rounded-pill"
+                    onClick={() => router.push('/customers')}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button 
+                  type="button" 
+                  className="btn btn-secondary px-4 fw-bold rounded-pill"
+                  onClick={() => router.push('/customers')}
+                >
+                  Back To Hub
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      </div>
+      {modal.isOpen && (
+        <FullPageStatus
+          type={modal.type}
+          title={modal.title}
+          message={modal.message}
+          onClose={() => {
+            setModal(prev => ({ ...prev, isOpen: false }));
+            if (modal.type === 'success') router.push('/customers');
+          }}
+        />
+      )}
+      <style jsx>{`
+        .form-control, .form-select {
+          height: 38px !important;
+          font-size: 0.85rem !important;
+        }
+        .x-small {
+           font-size: 0.75rem !important;
+        }
+      `}</style>
+    </>
+  );
+};
+
+export default CustomerForm;

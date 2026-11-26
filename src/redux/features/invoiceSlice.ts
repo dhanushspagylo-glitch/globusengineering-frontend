@@ -1,0 +1,555 @@
+import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
+import { Invoice } from '@/types/modules';
+import api from '@/lib/axios';
+import { updateCustomer } from './customerSlice';
+
+export const mapInvoice = (inv: any): Invoice => {
+  const cleanStr = (val: any): string => {
+    if (val === null || val === undefined) return '';
+    const str = String(val).trim();
+    if (str.toLowerCase() === 'null') return '';
+    return str;
+  };
+
+  const items = Array.isArray(inv.items_json)
+    ? inv.items_json
+    : JSON.parse(inv.items_json || '[]');
+
+  const grandTotal = parseFloat(String(inv.grandTotal || inv.grand_total || '0').replace(/[^\d.]/g, '')) || 0;
+  const subTotal = parseFloat(String(inv.subTotal || inv.sub_total || inv.total || '0').replace(/[^\d.]/g, '')) || 0;
+
+  const customerName = cleanStr(inv.customer?.customer_name) || cleanStr(inv.customer_name) || cleanStr(inv.customerName) || 'N/A';
+
+  let address = '';
+  if (inv.customer) {
+    const parts = [
+      cleanStr(inv.customer.street1),
+      cleanStr(inv.customer.street2),
+      cleanStr(inv.customer.city),
+      cleanStr(inv.customer.state)
+    ].filter(Boolean);
+    if (inv.customer.pin_code && String(inv.customer.pin_code).toLowerCase() !== 'null') {
+      parts.push(String(inv.customer.pin_code));
+    }
+    address = parts.join(', ');
+  }
+  if (!address) {
+    address = cleanStr(inv.address);
+  }
+
+  const gstin = cleanStr(inv.customer?.gst) || cleanStr(inv.gstin) || '';
+  const state = cleanStr(inv.customer?.state) || cleanStr(inv.state) || '';
+  const stateCode = cleanStr(inv.stateCode) || cleanStr(inv.state_code) || cleanStr(inv.customer?.state_code) || cleanStr(inv.customer?.stateCode) || '';
+
+  return {
+    id: inv.id.toString(),
+    invoiceNumber: inv.invoice_no && inv.invoice_no !== 0 ? String(inv.invoice_no).padStart(4, '0') : (inv.invoiceNumber || `INV-${inv.id}`),
+    customerId: inv.customer_id?.toString() || inv.customerId?.toString() || '',
+    customerName,
+    address,
+    company_id: inv.company_id?.toString() || inv.companyId?.toString() || '',
+    date: inv.invoice_date || inv.date ? new Date(inv.invoice_date || inv.date).toISOString().split('T')[0] : '',
+    dueDate: inv.due_date || inv.dueDate ? new Date(inv.due_date || inv.dueDate).toISOString().split('T')[0] : '',
+    poNo: inv.po_no || inv.poNo || '',
+    poDate: inv.po_date || inv.poDate ? new Date(inv.po_date || inv.poDate).toISOString().split('T')[0] : '',
+    challanNumber: inv.delivery_no && inv.delivery_no !== 0 ? String(inv.delivery_no).padStart(4, '0') : '',
+    dcNo: inv.dc_no || inv.dcNo || '',
+    dcDate: inv.dc_date || inv.dcDate ? new Date(inv.dc_date || inv.dcDate).toISOString().split('T')[0] : '',
+    grandTotal,
+    status: inv.status?.toLowerCase() || 'draft',
+    items: items.map((it: any) => {
+      const isWop = String(inv.billType || inv.bill_type || '').toLowerCase().includes('without');
+      const quantity = isWop ? 0 : (parseFloat(String(it.quantity ?? it.qty ?? '0').replace(/[^\d.]/g, '')) || 0);
+      const unitPrice = parseFloat(String(it.unitPrice ?? it.unit_price ?? it.price ?? '0').replace(/[^\d.]/g, '')) || 0;
+      const calculatedAmount = parseFloat((quantity * unitPrice).toFixed(2));
+      const amount = isWop ? 0 : (parseFloat(String(it.amount ?? '0').replace(/[^\d.]/g, '')) || calculatedAmount);
+      return {
+        id: it.id || Math.random().toString(36).substr(2, 9),
+        description: it.description || '',
+        process: it.process || '',
+        quantity,
+        wopQty: parseFloat(String(it.wopQty ?? it.wop_qty ?? '0').replace(/[^\d.]/g, '')) || 0,
+        hsnCode: it.hsnCode || it.hsn_code || '',
+        unitPrice,
+        amount,
+        tax: parseFloat(String(it.tax || '0').replace(/[^\d.]/g, '')) || 0,
+        total: parseFloat(String(it.total || '0').replace(/[^\d.]/g, '')) || (amount + (parseFloat(String(it.tax || '0')) || 0))
+      };
+    }),
+    subTotal,
+    taxTotal: parseFloat(String(inv.tax_total || inv.taxTotal || '0').replace(/[^\d.]/g, '')) || 0,
+    discount: parseFloat(String(inv.discount || '0').replace(/[^\d.]/g, '')) || 0,
+    type: inv.type || (
+      (inv.billType || inv.bill_type) === 'Without Process' || (inv.billType || inv.bill_type) === 'without_process' ? 'WOP' :
+        (inv.billType || inv.bill_type) === 'Both' || (inv.billType || inv.bill_type) === 'both' ? 'BOTH' : 'INVOICE'
+    ),
+    billType: inv.billType || (
+      inv.bill_type === 'with_process' ? 'With Process' :
+        inv.bill_type === 'without_process' ? 'Without Process' :
+          inv.bill_type === 'both' ? 'Both' : (inv.bill_type || 'With Process')
+    ),
+    inwardId: inv.inward_id?.toString() || inv.inwardId?.toString(),
+    createdAt: inv.app_created_at || inv.created_at || inv.createdAt,
+    notes: inv.notes || '',
+    gstin,
+    state,
+    stateCode,
+    paidAmount: parseFloat(String(inv.paid_amount || inv.paidAmount || '0').replace(/[^\d.]/g, '')) || 0,
+    otherCharges: parseFloat(String(inv.other_charges || inv.otherCharges || '0').replace(/[^\d.]/g, '')) || 0,
+    otherChargesDesc: inv.other_charges_desc || inv.otherChargesDesc || '',
+    taxRate: parseFloat(String(inv.tax_rate || inv.taxRate || '12').replace(/[^\d.]/g, '')) || 0,
+    shippingName: cleanStr(inv.shipping_name) || cleanStr(inv.shippingName) || '',
+    shippingAddress: cleanStr(inv.shipping_address) || cleanStr(inv.shippingAddress) || '',
+    shippingState: cleanStr(inv.shipping_state) || cleanStr(inv.shippingState) || '',
+    shippingGstin: cleanStr(inv.shipping_gstin) || cleanStr(inv.shippingGstin) || '',
+    gst1: inv.gst1,
+    gst2: inv.gst2,
+    igst: inv.igst
+  };
+};
+
+// Thunks
+export const fetchInvoices = createAsyncThunk(
+  'invoices/fetchAll',
+  async (params: { 
+    company_id?: string; 
+    id?: string | number;
+    page?: number; 
+    limit?: number; 
+    search?: string; 
+    status?: string; 
+    fromDate?: string; 
+    toDate?: string;
+    process?: string;
+    type?: string;
+    partyType?: string;
+    customerId?: string;
+    invoice_nos?: string;
+    sortBy?: string;
+    sortOrder?: 'asc' | 'desc';
+  }, { rejectWithValue }) => {
+    try {
+      const { company_id, id, page = 1, limit = 10, search, status, fromDate, toDate, process, type, partyType, customerId, invoice_nos, sortBy, sortOrder } = params;
+      let url = `/invoices?page=${page}&limit=${id ? 100 : limit}`;
+      if (company_id) url += `&company_id=${company_id}`;
+      if (id) url += `&id=${id}`;
+      if (search) url += `&search=${encodeURIComponent(search)}`;
+      if (status && status !== 'all') url += `&status=${status}`;
+      if (fromDate) url += `&fromDate=${fromDate}`;
+      if (toDate) url += `&toDate=${toDate}`;
+      if (process && process !== 'all') url += `&process=${encodeURIComponent(process)}`;
+      if (type && type !== 'all') url += `&type=${type}`;
+      if (partyType && partyType !== 'all') url += `&partyType=${partyType}`;
+      if (customerId && customerId !== 'all') url += `&customer_id=${customerId}`;
+      if (invoice_nos) url += `&invoice_nos=${encodeURIComponent(invoice_nos)}`;
+      if (sortBy) url += `&sortBy=${sortBy}`;
+      if (sortOrder) url += `&sortOrder=${sortOrder}`;
+      
+      const response = await api.get(url);
+      return {
+        items: response.data.items.map(mapInvoice),
+        pagination: response.data.pagination,
+        aggregates: response.data.aggregates || { totalTaxable: 0, totalGrand: 0, totalPaid: 0, totalTax: 0, totalOutstanding: 0 }
+      };
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.error || 'Failed to fetch invoices');
+    }
+  }
+);
+
+export const createInvoice = createAsyncThunk(
+  'invoices/create',
+  async (data: Omit<Invoice, 'id' | 'createdAt'>, { rejectWithValue }) => {
+    try {
+      const response = await api.post('/invoices', {
+        invoiceNumber: data.invoiceNumber,
+        date: data.date,
+        dueDate: data.dueDate,
+        customerId: data.customerId,
+        customerName: data.customerName,
+        subTotal: data.subTotal,
+        grandTotal: data.grandTotal,
+        discount: data.discount,
+        items: data.items,
+        status: data.status.toUpperCase(),
+        type: data.type,
+        billType: data.billType,
+        inwardId: data.inwardId,
+        company_id: data.company_id,
+        notes: data.notes,
+        poNo: (data as any).poNo,
+        poDate: (data as any).poDate,
+        challanNumber: data.challanNumber,
+        dcNo: (data as any).dcNo,
+        dcDate: (data as any).dcDate,
+        address: (data as any).address,
+        gstin: (data as any).gstin,
+        state: (data as any).state,
+        shipping_name: data.shippingName,
+        shipping_address: data.shippingAddress,
+        shipping_state: data.shippingState,
+        shipping_gstin: data.shippingGstin,
+        other_charges: data.otherCharges,
+        other_charges_desc: data.otherChargesDesc,
+        tax_total: data.taxTotal,
+        tax_rate: data.taxRate
+      });
+      return mapInvoice(response.data);
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.error || 'Failed to create invoice');
+    }
+  }
+);
+
+export const updateInvoice = createAsyncThunk(
+  'invoices/update',
+  async (data: Invoice, { rejectWithValue }) => {
+    try {
+      const response = await api.put(`/invoices/${data.id}`, {
+        date: data.date,
+        dueDate: data.dueDate,
+        customerId: data.customerId,
+        customerName: data.customerName,
+        subTotal: data.subTotal,
+        grandTotal: data.grandTotal,
+        discount: data.discount,
+        items: data.items,
+        status: data.status.toUpperCase(),
+        type: data.type,
+        billType: data.billType,
+        inwardId: data.inwardId,
+        notes: data.notes,
+        poNo: data.poNo,
+        poDate: data.poDate,
+        challanNumber: data.challanNumber,
+        dcNo: data.dcNo,
+        dcDate: data.dcDate,
+        address: (data as any).address,
+        gstin: (data as any).gstin,
+        state: (data as any).state,
+        shipping_name: data.shippingName,
+        shipping_address: data.shippingAddress,
+        shipping_state: data.shippingState,
+        shipping_gstin: data.shippingGstin,
+        other_charges: data.otherCharges,
+        other_charges_desc: data.otherChargesDesc,
+        tax_total: data.taxTotal,
+        tax_rate: data.taxRate
+      });
+      return mapInvoice(response.data);
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.error || 'Failed to update invoice');
+    }
+  }
+);
+
+export const deleteInvoice = createAsyncThunk(
+  'invoices/delete',
+  async (id: string, { rejectWithValue }) => {
+    try {
+      await api.delete(`/invoices/${id}`);
+      return id;
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.error || 'Failed to delete invoice');
+    }
+  }
+);
+
+export const fetchNextNumbers = createAsyncThunk(
+  'invoices/fetchNextNumbers',
+  async (params: { companyId: string }, { rejectWithValue }) => {
+    try {
+      const { companyId } = params;
+      const response = await api.get(`/invoices/next-numbers?companyId=${companyId}`);
+      return response.data;
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.error || 'Failed to fetch next numbers');
+    }
+  }
+);
+
+export const saveInvoiceSettings = createAsyncThunk(
+  'invoices/saveSettings',
+  async (params: { companyId: string, settings: any }, { rejectWithValue }) => {
+    try {
+      const { companyId, settings } = params;
+      // The backend stores invoice settings in the Company model
+      // We extract the logo fields for top-level company storage and put the rest in invoice_settings JSON
+      const { logo, logoSecondary, ...otherSettings } = settings;
+      const response = await api.put(`/companies/${companyId}`, {
+        logo: logo,
+        logoSecondary: logoSecondary,
+        invoiceSettings: otherSettings
+      });
+      return response.data;
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.error || 'Failed to save settings');
+    }
+  }
+);
+
+interface InvoiceState {
+  items: Invoice[];
+  loading: boolean;
+  error: string | null;
+  filters: {
+    search: string;
+    status: string;
+    partyType: string;
+    fromDate: string;
+    toDate: string;
+    process?: string;
+    customerId?: string;
+  };
+  pagination: {
+    currentPage: number;
+    itemsPerPage: number;
+    totalItems: number;
+    totalPages: number;
+  };
+  aggregates: {
+    totalTaxable: number;
+    totalGrand: number;
+    totalPaid: number;
+    totalTax: number;
+    totalOutstanding: number;
+  };
+  sorting: {
+    sortBy: string;
+    sortOrder: 'asc' | 'desc';
+  };
+  settings: {
+    logo: string | null;
+    logoSecondary: string | null;
+    termsAndConditions: string;
+    footerText: string;
+    prefix: string;
+    nextNumber: number;
+    challanPrefix?: string;
+    nextChallanNumber?: number;
+    showLogo: boolean;
+    accentColor: string;
+    nextInvoice: string | null;
+    nextChallan: string | null;
+    showDeclaration: boolean;
+    showWopText?: boolean;
+    enableRoundOff?: boolean;
+    vatTin?: string;
+    cstNo?: string;
+    panNo?: string;
+    bankName?: string;
+    bankAcc?: string;
+    bankBranchIfsc?: string;
+    companyName?: string;
+    companySubHeader?: string;
+    companyAddress?: string;
+    gstNo?: string;
+    stateDetails?: string;
+    declarationText?: string;
+  };
+}
+
+const initialState: InvoiceState = {
+  items: [],
+  loading: false,
+  error: null,
+  filters: {
+    search: '',
+    status: 'all',
+    partyType: 'customer',
+    fromDate: '',
+    toDate: '',
+    process: 'all',
+    customerId: 'all',
+  },
+  pagination: {
+    currentPage: 1,
+    itemsPerPage: 10,
+    totalItems: 0,
+    totalPages: 0,
+  },
+  aggregates: {
+    totalTaxable: 0,
+    totalGrand: 0,
+    totalPaid: 0,
+    totalTax: 0,
+    totalOutstanding: 0,
+  },
+  sorting: {
+    sortBy: 'id',
+    sortOrder: 'desc',
+  },
+  settings: {
+    logo: null,
+    logoSecondary: null,
+    termsAndConditions: '1. Please pay within 15 days from the date of invoice.\n2. Late payment is subject to interest of 2% per month.\n3. Goods once sold will not be taken back.',
+    footerText: 'Thank you for your business!',
+    prefix: 'INV',
+    nextNumber: 1,
+    challanPrefix: 'DC',
+    nextChallanNumber: 1,
+    showLogo: true,
+    accentColor: '#ea580c',
+    nextInvoice: null,
+    nextChallan: null,
+    showDeclaration: false,
+    showWopText: true,
+    enableRoundOff: true,
+
+    vatTin: '',
+    cstNo: '',
+    panNo: '',
+    bankName: '',
+    bankAcc: '',
+    bankBranchIfsc: '',
+    companyName: '',
+    companySubHeader: '',
+    companyAddress: '',
+    gstNo: '',
+    stateDetails: '',
+    declarationText: 'Supplied to Special Economic Zone-Duties & Taxes Are Exempted\n(Folio-No.8/3/2007 Suzlon ON INFRA SEZ DT.24.9.2007)\n\nUNDER EPCG LICENCE NO\n\n"Supply Meant For export/supply yo SEZ Unit or Sez developer for authorised Operations under Bond or Letter of Undertaking without Payment of Integrated Tax"\n(Export Covered Under LUT NO AD330625078562X v Dated 25/06/2025)\n\nDeclartion: We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct'
+  },
+};
+
+const invoiceSlice = createSlice({
+  name: 'invoices',
+  initialState,
+  reducers: {
+    setInvoiceFilters: (state, action: PayloadAction<Partial<InvoiceState['filters']>>) => {
+      state.filters = { ...state.filters, ...action.payload };
+      state.pagination.currentPage = 1;
+    },
+    setInvoicePage: (state, action: PayloadAction<number>) => {
+      state.pagination.currentPage = action.payload;
+    },
+    setInvoiceSorting: (state, action: PayloadAction<{ sortBy: string, sortOrder: 'asc' | 'desc' }>) => {
+      state.sorting = action.payload;
+      state.pagination.currentPage = 1;
+    },
+    updateInvoiceSettings: (state, action: PayloadAction<Partial<InvoiceState['settings']>>) => {
+      state.settings = { ...state.settings, ...action.payload };
+    },
+    initializeInvoiceSettings: (state, action: PayloadAction<Partial<InvoiceState['settings']>>) => {
+      state.settings = { ...state.settings, ...action.payload };
+    },
+    resetInvoiceState: (state) => {
+      state.filters = initialState.filters;
+      state.pagination.currentPage = 1;
+      state.sorting = initialState.sorting;
+    },
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(fetchInvoices.pending, (state) => {
+        state.loading = true;
+      })
+      .addCase(fetchInvoices.fulfilled, (state, action) => {
+        state.loading = false;
+        if (action.meta.arg?.id && state.items.length > 0) {
+          const fetchedItems = action.payload.items;
+          fetchedItems.forEach((item: Invoice) => {
+            const idx = state.items.findIndex((i: Invoice) => String(i.id) === String(item.id));
+            if (idx !== -1) {
+              state.items[idx] = item;
+            } else {
+              state.items.push(item);
+            }
+          });
+        } else {
+          state.items = action.payload.items;
+        }
+        state.pagination.totalItems = action.payload.pagination.total;
+        state.pagination.totalPages = action.payload.pagination.totalPages;
+        state.pagination.currentPage = action.payload.pagination.page;
+        state.aggregates = action.payload.aggregates || { totalTaxable: 0, totalGrand: 0, totalPaid: 0, totalTax: 0, totalOutstanding: 0 };
+        state.error = null;
+      })
+      .addCase(fetchInvoices.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.payload as string;
+      })
+      .addCase(createInvoice.fulfilled, (state, action) => {
+        state.items.unshift(action.payload);
+      })
+      .addCase(updateInvoice.fulfilled, (state, action) => {
+        const index = state.items.findIndex(item => item.id === action.payload.id);
+        if (index !== -1) {
+          state.items[index] = action.payload;
+        }
+      })
+      .addCase(deleteInvoice.fulfilled, (state, action) => {
+        state.items = state.items.filter(inv => inv.id !== action.payload);
+      })
+      .addCase(fetchNextNumbers.fulfilled, (state, action) => {
+        state.settings.nextInvoice = String(action.payload.nextInvoice || '').padStart(4, '0');
+        state.settings.nextChallan = String(action.payload.nextChallan || '').padStart(4, '0');
+      })
+      .addCase(saveInvoiceSettings.fulfilled, (state, action) => {
+        const company = action.payload;
+        // Process snake_case from backend if present
+        const invoiceSettings = company.invoiceSettings || (company.invoice_settings ? JSON.parse(company.invoice_settings) : {});
+        const logo = (company as any).logo || (company as any).logo;
+        const logoSecondary = (company as any).logoSecondary || (company as any).logo_secondary;
+
+        state.settings = {
+          ...state.settings,
+          ...invoiceSettings,
+          logo,
+          logoSecondary
+        };
+      })
+      .addCase(updateCustomer.fulfilled, (state, action) => {
+        const cust: any = action.payload;
+        if (!cust || !cust.id) return;
+        const cleanPart = (val: any): string => {
+          if (val === null || val === undefined) return '';
+          const s = String(val).trim();
+          return s.toLowerCase() === 'null' ? '' : s;
+        };
+        const newName = cleanPart(cust.name || cust.company || cust.customer_name);
+        const newAddress = [
+          cleanPart(cust.street1),
+          cleanPart(cust.street2),
+          cleanPart(cust.city),
+          cleanPart(cust.state),
+          cleanPart(cust.pinCode ?? cust.pin_code)
+        ].filter(Boolean).join(', ');
+        const newState = cleanPart(cust.state);
+        const newStateCode = cleanPart(cust.stateCode ?? cust.state_code);
+        const newGstin = cleanPart(cust.gst);
+
+        state.items = state.items.map((inv) => {
+          if (String(inv.customerId) !== String(cust.id)) return inv;
+          const prevName = cleanPart(inv.customerName).toLowerCase();
+          const prevAddr = cleanPart(inv.address).toLowerCase();
+          const prevState = cleanPart(inv.state).toLowerCase();
+          const prevGst = cleanPart(inv.gstin).toLowerCase();
+
+          return {
+            ...inv,
+            customerName: newName || inv.customerName,
+            address: newAddress,
+            state: newState,
+            stateCode: newStateCode,
+            gstin: newGstin,
+            shippingName: inv.shippingName && cleanPart(inv.shippingName).toLowerCase() === prevName ? (newName || inv.shippingName) : inv.shippingName,
+            shippingAddress: inv.shippingAddress && cleanPart(inv.shippingAddress).toLowerCase() === prevAddr ? newAddress : inv.shippingAddress,
+            shippingState: inv.shippingState && cleanPart(inv.shippingState).toLowerCase() === prevState ? newState : inv.shippingState,
+            shippingGstin: inv.shippingGstin && cleanPart(inv.shippingGstin).toLowerCase() === prevGst ? newGstin : inv.shippingGstin,
+          };
+        });
+      });
+  }
+});
+
+export const {
+  setInvoiceFilters,
+  setInvoicePage,
+  setInvoiceSorting,
+  updateInvoiceSettings,
+  initializeInvoiceSettings,
+  resetInvoiceState
+} = invoiceSlice.actions;
+
+export const addInvoice = createInvoice;
+export default invoiceSlice.reducer;

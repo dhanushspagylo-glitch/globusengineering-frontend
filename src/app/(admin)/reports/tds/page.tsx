@@ -1,0 +1,308 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import { RootState } from '@/redux/store';
+import { fetchVouchers, setVoucherPage, setVoucherFilters, setVoucherSorting } from '@/redux/features/voucherSlice';
+import Link from 'next/link';
+import Loader from '@/components/Loader';
+import ReportActions from '@/components/ReportActions';
+import Breadcrumb from '@/components/Breadcrumb';
+import PaginationComponent from '@/components/shared/Pagination';
+import PartyTypeToggle from '@/components/shared/PartyTypeToggle';
+import api from '@/lib/axios';
+import SortableHeader from '@/components/shared/SortableHeader';
+
+const TDSReportPage = () => {
+  const [mounted, setMounted] = useState(false);
+  const dispatch = useDispatch();
+  const { company: activeCompany } = useSelector((state: RootState) => state.auth);
+  const { items, filters, pagination, loading, aggregates, sorting } = useSelector((state: RootState) => state.voucher);
+
+  useEffect(() => {
+    setMounted(true);
+    if (activeCompany?.id) {
+      (dispatch as any)(fetchVouchers({
+        company_id: activeCompany.id,
+        page: pagination.currentPage,
+        limit: pagination.itemsPerPage,
+        search: filters.search,
+        type: filters.type,
+        partyType: (filters as any).partyType,
+        fromDate: filters.fromDate,
+        toDate: filters.toDate,
+        sortBy: sorting.sortBy,
+        sortOrder: sorting.sortOrder
+      }));
+    }
+  }, [dispatch, activeCompany?.id, pagination.currentPage, pagination.itemsPerPage, filters.search, filters.type, (filters as any).partyType, filters.fromDate, filters.toDate, sorting.sortBy, sorting.sortOrder]);
+
+  const handleSort = (field: string) => {
+    const newOrder = sorting.sortBy === field && sorting.sortOrder === 'asc' ? 'desc' : 'asc';
+    dispatch(setVoucherSorting({ sortBy: field, sortOrder: newOrder }));
+  };
+
+  if (!mounted) return null;
+
+  const handleFetchAllForExport = async () => {
+    if (!activeCompany?.id) return { headers: [], data: [] };
+
+    let url = `/vouchers?page=1&limit=10000&company_id=${activeCompany.id}`;
+    if (filters.search) url += `&search=${encodeURIComponent(filters.search)}`;
+    if (filters.fromDate) url += `&fromDate=${filters.fromDate}`;
+    if (filters.toDate) url += `&toDate=${filters.toDate}`;
+    if (filters.type && filters.type !== 'all') url += `&type=${filters.type}`;
+    if ((filters as any).partyType && (filters as any).partyType !== 'all') url += `&partyType=${(filters as any).partyType}`;
+
+    const response = await api.get(url);
+    const allVouchers = response.data.items;
+
+    // Aggregate by Party Name for Industrial Audit Report
+    const aggregatedMap = new Map();
+    
+    allVouchers.forEach((v: any) => {
+      const party = v.party_name || v.partyName || 'N/A';
+      if (!aggregatedMap.has(party)) {
+        aggregatedMap.set(party, {
+          partyName: party,
+          tdsAmount: 0,
+          othersAmount: 0,
+          totalAdjustment: 0
+        });
+      }
+      const record = aggregatedMap.get(party);
+      record.tdsAmount += parseFloat(String(v.tds_amount || v.tdsAmount || 0));
+      record.othersAmount += parseFloat(String(v.others_amount || v.othersAmount || 0));
+      record.totalAdjustment = record.tdsAmount + record.othersAmount;
+    });
+
+    const data = Array.from(aggregatedMap.values()).map((item: any, idx: number) => [
+      (idx + 1).toString(),
+      item.partyName.toUpperCase(),
+      item.tdsAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 }),
+      item.othersAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 }),
+      item.totalAdjustment.toLocaleString('en-IN', { minimumFractionDigits: 2 })
+    ]);
+
+    const totalTds = Array.from(aggregatedMap.values()).reduce((sum: number, item: any) => sum + item.tdsAmount, 0);
+    const totalOthers = Array.from(aggregatedMap.values()).reduce((sum: number, item: any) => sum + item.othersAmount, 0);
+    const totalAdj = Array.from(aggregatedMap.values()).reduce((sum: number, item: any) => sum + item.totalAdjustment, 0);
+
+    data.push([
+      '', 
+      'TOTAL', 
+      totalTds.toLocaleString('en-IN', { minimumFractionDigits: 2 }), 
+      totalOthers.toLocaleString('en-IN', { minimumFractionDigits: 2 }), 
+      totalAdj.toLocaleString('en-IN', { minimumFractionDigits: 2 })
+    ]);
+
+    return {
+      headers: ['SNO', 'CUSTOMER NAME', 'TOTAL TDS', 'OTHER ADJUSTMENT', 'TOTAL ADJUSTMENT'],
+      data
+    };
+  };
+
+  const getTypeColor = (type: string) => {
+    switch (type) {
+      case 'payment': return 'text-danger';
+      case 'receipt': return 'text-success';
+      default: return 'text-dark';
+    }
+  };
+
+  return (
+    <div className="container-fluid py-4 bg-light min-vh-100 animate-fade-in px-4">
+      <div className="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+        <div>
+          <Breadcrumb items={[{ label: 'Reports', active: false }, { label: 'TDS Report', active: true }]} />
+          <h2 className="fw-900 tracking-tight text-dark mb-1 mt-2">TDS & Deduction Report</h2>
+          <p className="text-muted small mb-0">Record of all financial transactions with tax and manual deduction analysis.</p>
+        </div>
+        <div className="d-flex align-items-center gap-2">
+          <ReportActions 
+            setFromDate={(d) => dispatch(setVoucherFilters({ fromDate: d }))} 
+            setToDate={(d) => dispatch(setVoucherFilters({ toDate: d }))} 
+            fromDate={filters.fromDate}
+            toDate={filters.toDate}
+            title="TDS Report" 
+            onFetchAll={handleFetchAllForExport} 
+            variant="industrial"
+          />
+          <button className="btn btn-white shadow-sm border border-light px-3 d-flex align-items-center gap-2" style={{ height: '36px', borderRadius: '18px' }} onClick={() => dispatch(fetchVouchers({ company_id: activeCompany?.id }) as any)}>
+            <i className="bi bi-arrow-repeat text-primary fw-bold"></i>
+            <span className="small fw-800 text-muted">Refresh</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Summary Cards */}
+      <div className="row g-3 mb-4 animate-fade-in-up">
+        <div className="col-md-4">
+          <div className="card border-0 shadow-sm h-100 overflow-hidden" style={{ borderRadius: '16px', background: 'linear-gradient(135deg, #4f46e5 0%, #3730a3 100%)' }}>
+            <div className="card-body p-4 position-relative">
+              <div className="position-absolute" style={{ right: '-10px', top: '-10px', opacity: '0.15' }}>
+                <i className="bi bi-wallet2" style={{ fontSize: '80px' }}></i>
+              </div>
+              <h6 className="text-white text-uppercase fw-bold x-small tracking-wider mb-2 opacity-75">Total Transaction Amount</h6>
+              <h3 className="text-white fw-900 mb-0">₹{aggregates.totalCollected?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h3>
+              <div className="mt-2 text-white x-small opacity-75 fw-medium">For current filtered results</div>
+            </div>
+          </div>
+        </div>
+        <div className="col-md-4">
+          <div className="card border-0 shadow-sm h-100 overflow-hidden" style={{ borderRadius: '16px', background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)' }}>
+            <div className="card-body p-4 position-relative">
+              <div className="position-absolute" style={{ right: '-10px', top: '-10px', opacity: '0.15' }}>
+                <i className="bi bi-shield-check" style={{ fontSize: '80px' }}></i>
+              </div>
+              <h6 className="text-white text-uppercase fw-bold x-small tracking-wider mb-2 opacity-75">Total TDS Reduced</h6>
+              <h3 className="text-white fw-900 mb-0">₹{(aggregates.totalTDS || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h3>
+              <div className="mt-2 text-white x-small opacity-75 fw-medium">Sum of all tax deductions</div>
+            </div>
+          </div>
+        </div>
+        <div className="col-md-4">
+          <div className="card border-0 shadow-sm h-100 overflow-hidden" style={{ borderRadius: '16px', background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
+            <div className="card-body p-4 position-relative">
+              <div className="position-absolute" style={{ right: '-10px', top: '-10px', opacity: '0.15' }}>
+                <i className="bi bi-plus-slash-minus" style={{ fontSize: '80px' }}></i>
+              </div>
+              <h6 className="text-white text-uppercase fw-bold x-small tracking-wider mb-2 opacity-75">Total Others Reduced</h6>
+              <h3 className="text-white fw-900 mb-0">₹{(aggregates.totalOthers || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h3>
+              <div className="mt-2 text-white x-small opacity-75 fw-medium">Sum of all other deductions</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Filters Card */}
+      <div className="card border-0 shadow-sm mb-4 rounded-4 overflow-hidden">
+        <div className="card-body p-3">
+          <div className="filter-bar-row d-flex flex-wrap gap-2 align-items-center">
+            <div className="filter-item-select" style={{ minWidth: '150px' }}>
+              <PartyTypeToggle
+                partyType={(filters as any).partyType || 'customer'}
+                setPartyType={(val) => dispatch(setVoucherFilters({ partyType: val }))}
+              />
+            </div>
+            
+            <div className="filter-item-search flex-grow-1" style={{ maxWidth: '400px' }}>
+              <div className="search-group" style={{ width: "100%" }}>
+                <span className="input-group-text bg-white border-end-0">
+                  <i className="bi bi-search"></i>
+                </span>
+                <input
+                  type="text"
+                  className="form-control border-start-0 ps-0 shadow-none search-bar"
+                  placeholder="Search by voucher no, party..."
+                  value={filters.search}
+                  onChange={(e) => dispatch(setVoucherFilters({ search: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div className="date-filter-group ms-auto">
+              <input type="date" className="text-muted" value={filters.fromDate} onChange={(e) => dispatch(setVoucherFilters({ fromDate: e.target.value }))} />
+              <span className="text-muted small fw-bold mx-1">TO</span>
+              <input type="date" className="text-muted" value={filters.toDate} onChange={(e) => dispatch(setVoucherFilters({ toDate: e.target.value }))} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card border-0 shadow-sm rounded-4 overflow-hidden">
+        <div className="card-body p-0">
+          <div className="table-responsive" style={{ minHeight: '400px', paddingBottom: '80px' }}>
+            <table className="table table-hover align-middle mb-0">
+              <thead>
+                <tr className="bg-light text-capitalize">
+                  <th className="px-4 py-3 border-0 small fw-bold text-muted">Sno</th>
+                  <SortableHeader field="voucher_no" label="Voucher Info" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted" />
+                  <SortableHeader field="date" label="Date" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted" />
+                  <SortableHeader field="party_name" label="Party / Account" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted" />
+                  <SortableHeader field="amount" label="Amount" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-end" />
+                  <SortableHeader field="tds_amount" label="TDS" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-end" />
+                  <SortableHeader field="others_amount" label="Others" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-end" />
+                  <SortableHeader field="payment_mode" label="Mode" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-center" />
+                  <SortableHeader field="status" label="Status" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-center px-4" />
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={9}>
+                      <Loader text="Compiling Report Records..." />
+                    </td>
+                  </tr>
+                ) : (
+                  <>
+                    {items.map((voucher, index) => (
+                      <tr key={voucher.id}>
+                        <td className="px-4 text-nowrap text-muted small">{(pagination.currentPage - 1) * pagination.itemsPerPage + index + 1}</td>
+                        <td className="text-nowrap fw-bold text-dark">
+                          <Link href={`/vouchers/${voucher.id}/edit?readonly=true`} className="text-primary fw-bold text-decoration-none hover-underline">{voucher.voucherNo}</Link>
+                          <div className={`x-small text-capitalize fw-normal ${getTypeColor(voucher.type)}`}>
+                            {voucher.type}
+                          </div>
+                        </td>
+                        <td className="text-nowrap text-muted small">{voucher.date ? new Date(voucher.date).toLocaleDateString('en-GB').replace(/\//g, '-') : '-'}</td>
+                        <td className="text-nowrap text-muted small">
+                          <div className="fw-bold text-dark">{voucher.partyName}</div>
+                          <div className="x-small text-truncate" style={{ maxWidth: '200px' }}>{voucher.description?.replace(/^Migrated\s+/i, '')}</div>
+                        </td>
+                        <td className="text-nowrap text-end fw-bold">
+                          <span className={voucher.type === 'payment' ? 'text-danger' : 'text-success'}>
+                            ₹{voucher.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          </span>
+                        </td>
+                        <td className="text-nowrap text-end fw-bold text-muted small">
+                          {(voucher.tdsAmount || 0) > 0 ? `₹${voucher.tdsAmount?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td className="text-nowrap text-end fw-bold text-muted small">
+                          {(voucher.othersAmount || 0) > 0 ? `₹${voucher.othersAmount?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td className="text-nowrap text-center text-muted small text-capitalize fw-bold">{voucher.paymentMode}</td>
+                        <td className="text-center px-4">
+                          <span className="badge bg-light text-dark border-0 shadow-sm x-small fw-bold text-capitalize">
+                            {voucher.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                    {items.length === 0 && (
+                      <tr>
+                        <td colSpan={9} className="text-center py-5 text-muted">
+                          No voucher records found matching your report criteria.
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {pagination.totalPages > 1 && (
+            <div className="px-4 py-3 border-top d-flex align-items-center justify-content-between bg-light">
+              <div className="text-muted small">
+                Showing {(pagination.currentPage - 1) * pagination.itemsPerPage + 1} to {Math.min(pagination.currentPage * pagination.itemsPerPage, pagination.totalItems)} of {pagination.totalItems} entries
+              </div>
+              <PaginationComponent 
+                currentPage={pagination.currentPage} 
+                totalPages={pagination.totalPages} 
+                onPageChange={(page) => dispatch(setVoucherPage(page))} 
+              />
+            </div>
+          )}
+        </div>
+      </div>
+
+      <style jsx>{`
+        .fw-900 { font-weight: 900; }
+        .x-small { font-size: 0.75rem; }
+      `}</style>
+    </div>
+  );
+};
+
+export default TDSReportPage;

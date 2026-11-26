@@ -1,0 +1,656 @@
+'use client';
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import Link from 'next/link';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+import { RootState } from '@/redux/store';
+import { setVoucherFilters, setVoucherPage, fetchVouchers, deleteVoucher, resetVoucherState, setVoucherSorting } from '@/redux/features/voucherSlice';
+import { fetchCustomers } from '@/redux/features/customerSlice';
+import { fetchVendors } from '@/redux/features/vendorSlice';
+import SearchableSelect from '@/components/shared/SearchableSelect';
+import Breadcrumb from '@/components/Breadcrumb';
+import { checkActionPermission } from '@/config/permissions';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import Loader from '@/components/Loader';
+import ConfirmationModal from '@/components/ConfirmationModal';
+import ExportExcel from '@/components/shared/ExportExcel';
+import PaginationComponent from '@/components/shared/Pagination';
+import IndustrialDocument from '@/components/shared/IndustrialDocument';
+import PartyTypeToggle from '@/components/shared/PartyTypeToggle';
+import html2canvas from 'html2canvas';
+import SortableHeader from '@/components/shared/SortableHeader';
+import api from '@/lib/axios';
+
+
+const VoucherPage = () => {
+  const dispatch = useDispatch();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const { user, company: activeCompany } = useSelector((state: RootState) => state.auth);
+  const { items, filters, pagination, loading, aggregates, sorting } = useSelector((state: RootState) => state.voucher);
+  const { items: customers } = useSelector((state: RootState) => state.customers);
+  const { items: vendors } = useSelector((state: RootState) => state.vendors);
+
+  const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; id: string | null }>({ isOpen: false, id: null });
+  const [mounted, setMounted] = useState(false);
+  const isInitializedRef = useRef(false);
+
+  // Fetch customers & vendors if not yet in state
+  useEffect(() => {
+    if (activeCompany?.id) {
+      if (customers.length === 0) {
+        (dispatch as any)(fetchCustomers({ company_id: activeCompany.id, limit: 1000 }));
+      }
+      if (vendors.length === 0) {
+        (dispatch as any)(fetchVendors({ company_id: activeCompany.id, limit: 1000 }));
+      }
+    }
+  }, [dispatch, activeCompany?.id, customers.length, vendors.length]);
+
+  const effectivePartyType = 'customer';
+  const isVendor = false;
+
+  const partyOptions = useMemo(() => {
+    const sorted = [...customers].sort((a, b) =>
+      (a.company || a.name || '').localeCompare(b.company || b.name || '')
+    );
+    return [
+      { value: 'all', label: 'All Customers', displayLabel: 'All Customers' },
+      ...sorted.map(c => ({
+        value: String(c.id),
+        label: c.company || c.name || `Customer #${c.id}`,
+        displayLabel: c.company || c.name || `Customer #${c.id}`
+      }))
+    ];
+  }, [customers]);
+
+  // 1. Initial Load: Read all query parameters from URL and populate Redux state
+  useEffect(() => {
+    setMounted(true);
+
+    const qPartyType = searchParams.get('partyType');
+    const qSearch = searchParams.get('search');
+    const qCustomerId = searchParams.get('customerId') || searchParams.get('customer_id') || searchParams.get('partyId');
+    const qType = searchParams.get('type');
+    const qStatus = searchParams.get('status');
+    const qFromDate = searchParams.get('fromDate');
+    const qToDate = searchParams.get('toDate');
+    const qPage = searchParams.get('page');
+    const qSortBy = searchParams.get('sortBy');
+    const qSortOrder = searchParams.get('sortOrder') as 'asc' | 'desc';
+
+    const initialFilters: any = {};
+    // Strictly lock partyType to customer
+    initialFilters.partyType = 'customer';
+    if (qSearch !== null && qSearch !== '') initialFilters.search = qSearch;
+    if (qCustomerId !== null && qCustomerId !== '' && qCustomerId !== 'all') initialFilters.customerId = qCustomerId;
+    if (qType !== null && qType !== '') initialFilters.type = qType;
+    if (qStatus !== null && qStatus !== '') initialFilters.status = qStatus;
+    if (qFromDate !== null && qFromDate !== '') initialFilters.fromDate = qFromDate;
+    if (qToDate !== null && qToDate !== '') initialFilters.toDate = qToDate;
+
+    if (Object.keys(initialFilters).length > 0) {
+      dispatch(setVoucherFilters(initialFilters));
+    }
+
+    if (qPage && !isNaN(parseInt(qPage)) && parseInt(qPage) > 1) {
+      dispatch(setVoucherPage(parseInt(qPage)));
+    }
+
+    if (qSortBy) {
+      dispatch(setVoucherSorting({
+        sortBy: qSortBy,
+        sortOrder: qSortOrder === 'asc' ? 'asc' : 'desc'
+      }));
+    }
+
+    isInitializedRef.current = true;
+
+    return () => {
+      dispatch(resetVoucherState());
+    };
+  }, [dispatch]);
+
+  // 2. State to URL Sync
+  useEffect(() => {
+    if (!isInitializedRef.current || !mounted) return;
+
+    const handler = setTimeout(() => {
+      const params = new URLSearchParams();
+
+      // Strictly lock partyType to customer
+      params.set('partyType', 'customer');
+      if (filters.search && filters.search.trim()) {
+        params.set('search', filters.search.trim());
+      }
+      if (filters.customerId && filters.customerId !== 'all') {
+        params.set('customerId', filters.customerId);
+      }
+      if (filters.type && filters.type !== 'all') {
+        params.set('type', filters.type);
+      }
+      if (filters.status && filters.status !== 'all') {
+        params.set('status', filters.status);
+      }
+      if (filters.fromDate) {
+        params.set('fromDate', filters.fromDate);
+      }
+      if (filters.toDate) {
+        params.set('toDate', filters.toDate);
+      }
+
+      if (pagination.currentPage > 1) {
+        params.set('page', String(pagination.currentPage));
+      }
+
+      if (sorting?.sortBy && sorting.sortBy !== 'date' && sorting.sortBy !== 'id') {
+        params.set('sortBy', sorting.sortBy);
+      }
+      if (sorting?.sortOrder && sorting.sortOrder !== 'desc') {
+        params.set('sortOrder', sorting.sortOrder);
+      }
+
+      const currentQs = searchParams.toString();
+      const newQs = params.toString();
+
+      if (currentQs !== newQs) {
+        router.replace(newQs ? `${pathname}?${newQs}` : pathname, { scroll: false });
+      }
+    }, 250);
+
+    return () => clearTimeout(handler);
+  }, [
+    filters.search,
+    filters.customerId,
+    filters.type,
+    filters.partyType,
+    filters.status,
+    filters.fromDate,
+    filters.toDate,
+    pagination.currentPage,
+    sorting?.sortBy,
+    sorting?.sortOrder,
+    searchParams,
+    pathname,
+    router,
+    mounted
+  ]);
+
+  useEffect(() => {
+    if (activeCompany?.id) {
+      (dispatch as any)(fetchVouchers({
+        company_id: activeCompany.id,
+        page: pagination.currentPage,
+        limit: pagination.itemsPerPage,
+        search: filters.search,
+        type: filters.type !== 'all' ? filters.type : undefined,
+        partyType: 'customer',
+        customerId: filters.customerId !== 'all' ? filters.customerId : undefined,
+        status: filters.status !== 'all' ? filters.status : undefined,
+        fromDate: filters.fromDate,
+        toDate: filters.toDate,
+        sortBy: sorting.sortBy,
+        sortOrder: sorting.sortOrder
+      }));
+    }
+  }, [
+    dispatch,
+    activeCompany?.id,
+    pagination.currentPage,
+    pagination.itemsPerPage,
+    filters.search,
+    filters.type,
+    filters.partyType,
+    filters.customerId,
+    filters.status,
+    filters.fromDate,
+    filters.toDate,
+    sorting.sortBy,
+    sorting.sortOrder
+  ]);
+
+  const totalPages = pagination.totalPages;
+  const paginatedItems = items.filter(v => (v.partyType || (v as any).party_type || 'customer').toLowerCase() === 'customer');
+
+  const handleSort = (field: string) => {
+    const newOrder = sorting.sortBy === field && sorting.sortOrder === 'asc' ? 'desc' : 'asc';
+    dispatch(setVoucherSorting({ sortBy: field, sortOrder: newOrder }));
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case 'posted': return <span className="badge bg-success-soft text-success px-3 py-2 rounded-pill fw-700 x-small">POSTED</span>;
+      case 'draft': return <span className="badge bg-secondary-soft text-muted px-3 py-2 rounded-pill fw-700 x-small">DRAFT</span>;
+      case 'cancelled': return <span className="badge bg-danger-soft text-danger px-3 py-2 rounded-pill fw-700 x-small">CANCELLED</span>;
+      default: return null;
+    }
+  };
+
+  const getTypeColor = (type: string) => {
+    switch (type) {
+      case 'payment': return 'text-danger';
+      case 'receipt': return 'text-success';
+      case 'journal': return 'text-primary';
+      case 'contra': return 'text-warning';
+      default: return 'text-dark';
+    }
+  };
+
+  const [downloadingItem, setDownloadingItem] = useState<any>(null);
+  const downloadRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (downloadingItem && downloadRef.current) {
+      const captureAndDownload = async () => {
+        await new Promise(resolve => setTimeout(resolve, 800));
+        if (downloadRef.current) {
+          const canvas = await html2canvas(downloadRef.current, { scale: 2, useCORS: true, logging: false });
+          const imgData = canvas.toDataURL('image/png');
+          const pdf = new jsPDF('p', 'mm', 'a4');
+          const imgProps = pdf.getImageProperties(imgData);
+          const pdfWidth = pdf.internal.pageSize.getWidth();
+          const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+          pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+          pdf.save(`VOUCHER_${downloadingItem.voucherNo || downloadingItem.id}.pdf`);
+          setDownloadingItem(null);
+        }
+      };
+      captureAndDownload();
+    }
+  }, [downloadingItem]);
+
+  const handlePrintVoucherRecord = (voucher: any) => {
+    router.push(`/logistics-print?type=voucher&id=${voucher.id}&print=true`);
+  };
+
+  const handleExportPDFVoucherRecord = (voucher: any) => {
+    setDownloadingItem(voucher);
+  };
+
+  const handleDeleteParams = (id: string) => {
+    setDeleteModal({ isOpen: true, id });
+  };
+
+  const fetchExportData = async () => {
+    if (!activeCompany?.id) return [];
+    
+    let url = `/vouchers?page=1&limit=1000000&company_id=${activeCompany.id}`;
+    if (filters.search) url += `&search=${encodeURIComponent(filters.search)}`;
+    if (filters.type && filters.type !== 'all') url += `&type=${filters.type}`;
+    url += '&partyType=customer';
+    const targetPartyId = filters.customerId || filters.partyId;
+    if (targetPartyId && targetPartyId !== 'all') url += `&partyId=${targetPartyId}`;
+    if (filters.status && filters.status !== 'all') url += `&status=${filters.status}`;
+    if (filters.fromDate) url += `&fromDate=${filters.fromDate}`;
+    if (filters.toDate) url += `&toDate=${filters.toDate}`;
+    if (sorting.sortBy) url += `&sortBy=${sorting.sortBy}`;
+    if (sorting.sortOrder) url += `&sortOrder=${sorting.sortOrder}`;
+    
+    try {
+      const response = await api.get(url);
+      return response.data.items || [];
+    } catch (err) {
+      console.error('Error fetching export data:', err);
+      return [];
+    }
+  };
+
+  const confirmDelete = () => {
+    if (deleteModal.id) {
+      (dispatch as any)(deleteVoucher(deleteModal.id));
+    }
+  };
+
+  return (
+    <div className="container-fluid py-4 min-vh-100 animate-fade-in px-4">
+      <div className="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+        <div>
+          <Breadcrumb 
+            items={[
+              { label: 'Voucher System', active: true }
+            ]} 
+          />
+          <h2 className="fw-900 tracking-tight text-dark mb-1 mt-2">Voucher Management</h2>
+          <p className="text-muted small mb-0">Record and track financial transactions for industrial accounts.</p>
+        </div>
+          <div className="d-flex align-items-center gap-3">
+            <ExportExcel 
+              data={items} 
+              fetchData={fetchExportData}
+              fileName="Voucher_Records" 
+              headers={{ voucherNo: 'Voucher No', type: 'Type', partyName: 'Party', amount: 'Amount', date: 'Date', status: 'Status' }}
+              buttonText="Export List"
+            />
+          {mounted && checkActionPermission(user, 'mod_voucher', 'create') && (
+            <Link href="/vouchers/new" className="btn btn-primary btn-page-action px-4">
+              <i className="bi bi-plus-lg"></i>
+              <span>Add Voucher</span>
+            </Link>
+          )}
+        </div>
+      </div>
+
+      {/* Summary Cards */}
+      <div className="row g-3 mb-4 animate-fade-in-up">
+        <div className="col-md-4">
+          <div className="card border-0 shadow-sm h-100 overflow-hidden" style={{ borderRadius: '16px', background: 'linear-gradient(135deg, #4f46e5 0%, #3730a3 100%)' }}>
+            <div className="card-body p-4 position-relative">
+              <div className="position-absolute" style={{ right: '-10px', top: '-10px', opacity: '0.15' }}>
+                <i className="bi bi-wallet2" style={{ fontSize: '80px' }}></i>
+              </div>
+              <h6 className="text-white text-uppercase fw-bold x-small tracking-wider mb-2 opacity-75">Total Transaction Amount</h6>
+              <h3 className="text-white fw-900 mb-0">₹{aggregates.totalCollected?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h3>
+              <div className="mt-2 text-white x-small opacity-75 fw-medium">For current filtered results</div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="col-md-4">
+          <div className="card border-0 shadow-sm h-100 overflow-hidden" style={{ borderRadius: '16px', background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)' }}>
+            <div className="card-body p-4 position-relative">
+              <div className="position-absolute" style={{ right: '-10px', top: '-10px', opacity: '0.15' }}>
+                <i className="bi bi-shield-check" style={{ fontSize: '80px' }}></i>
+              </div>
+              <h6 className="text-white text-uppercase fw-bold x-small tracking-wider mb-2 opacity-75">Total TDS Reduced</h6>
+              <h3 className="text-white fw-900 mb-0">₹{(aggregates.totalTDS || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h3>
+              <div className="mt-2 text-white x-small opacity-75 fw-medium">Sum of all tax deductions</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="col-md-4">
+          <div className="card border-0 shadow-sm h-100 overflow-hidden" style={{ borderRadius: '16px', background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}>
+            <div className="card-body p-4 position-relative">
+              <div className="position-absolute" style={{ right: '-10px', top: '-10px', opacity: '0.15' }}>
+                <i className="bi bi-plus-slash-minus" style={{ fontSize: '80px' }}></i>
+              </div>
+              <h6 className="text-white text-uppercase fw-bold x-small tracking-wider mb-2 opacity-75">Total Others Reduced</h6>
+              <h3 className="text-white fw-900 mb-0">₹{(aggregates.totalOthers || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h3>
+              <div className="mt-2 text-white x-small opacity-75 fw-medium">Sum of all other deductions</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Filters Card */}
+      <div className="card filter-card" style={{ overflow: 'visible', position: 'relative', zIndex: 100 }}>
+        <div className="card-body p-3" style={{ overflow: 'visible' }}>
+          <div className="filter-bar-row d-flex flex-wrap gap-2 align-items-center">
+            {/* <div className="filter-item-select" style={{ minWidth: '150px' }}>
+              <PartyTypeToggle
+                partyType={(filters.partyType as any) || 'customer'}
+                setPartyType={(val) => dispatch(setVoucherFilters({ partyType: val, customerId: 'all', partyId: 'all' }))}
+              />
+            </div> */}
+            
+            {/* Separate Customer Dropdown List with Search Input */}
+            <div className="filter-item-select flex-grow-1 voucher-customer-filter" style={{ minWidth: '240px' }}>
+              <SearchableSelect
+                options={partyOptions}
+                value={filters.customerId || 'all'}
+                onChange={(val) => dispatch(setVoucherFilters({ customerId: String(val), partyId: String(val) }))}
+                placeholder="Select Customer"
+                className="w-100"
+              />
+            </div>
+
+            {/* General Text Search */}
+            <div className="filter-item-search" style={{ minWidth: '220px' }}>
+              <div className="search-group">
+                <span className="input-group-text">
+                  <i className="bi bi-search"></i>
+                </span>
+                <input 
+                  type="text" 
+                  className="form-control search-bar" 
+                  placeholder="Search by voucher no, ref..." 
+                  value={filters.search}
+                  onChange={(e) => dispatch(setVoucherFilters({ search: e.target.value }))}
+                />
+              </div>
+            </div>
+            
+            {/* Voucher Type Filter */}
+            <div className="filter-item-select" style={{ minWidth: '140px' }}>
+              <select 
+                className="form-select search-bar" 
+                value={filters.type}
+                onChange={(e) => dispatch(setVoucherFilters({ type: e.target.value as any }))}
+              >
+                <option value="all">All Types</option>
+                <option value="payment">Payment</option>
+                <option value="receipt">Receipt</option>
+              </select>
+            </div>
+
+            {/* Status Filter */}
+            <div className="filter-item-select" style={{ minWidth: '140px' }}>
+              <select 
+                className="form-select search-bar" 
+                value={filters.status}
+                onChange={(e) => dispatch(setVoucherFilters({ status: e.target.value as any }))}
+              >
+                <option value="all">All Status</option>
+                <option value="posted">Posted</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </div>
+
+            {/* Date Filter Group */}
+            <div className="date-filter-group">
+              <input 
+                type="date" 
+                className="text-muted" 
+                value={filters.fromDate}
+                onChange={(e) => dispatch(setVoucherFilters({ fromDate: e.target.value }))}
+              />
+              <span className="text-muted small fw-bold mx-1">TO</span>
+              <input 
+                type="date" 
+                className="text-muted" 
+                value={filters.toDate}
+                onChange={(e) => dispatch(setVoucherFilters({ toDate: e.target.value }))}
+              />
+            </div>
+
+            {/* Clear Filter Button */}
+            {((filters.customerId && filters.customerId !== 'all') || filters.search || (filters.status && filters.status !== 'all') || (filters.type && filters.type !== 'all') || filters.fromDate || filters.toDate) && (
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-danger d-flex align-items-center gap-1 shadow-none"
+                style={{ height: '38px', borderRadius: '8px', fontSize: '0.78rem' }}
+                onClick={() => dispatch(setVoucherFilters({ search: '', status: 'all', type: 'all', fromDate: '', toDate: '', customerId: 'all', partyId: 'all' }))}
+                title="Reset all filters"
+              >
+                <i className="bi bi-x-circle"></i>
+                <span>Clear</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="card border-0 shadow-sm rounded-4 overflow-hidden bg-white" style={{ position: 'relative', zIndex: 1 }}>
+        <div className="card-body p-0">
+          <div className="table-responsive">
+            <table className="table table-hover align-middle mb-0">
+              <thead>
+                <tr className="bg-light">
+                  <th className="px-4 py-3 border-0 small fw-bold text-muted">Sno</th>
+                  <SortableHeader field="voucher_no" label="Voucher Info" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted" />
+                  <SortableHeader field="date" label="Date" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted" />
+                  <SortableHeader field="party_name" label="Party / Account" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted" />
+                  <SortableHeader field="amount" label="Amount" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-end" />
+                  <SortableHeader field="tds_amount" label="TDS" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-end" />
+                  <SortableHeader field="others_amount" label="Others" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-end" />
+                  <SortableHeader field="payment_mode" label="Mode" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted" />
+                  <SortableHeader field="status" label="Status" currentSortBy={sorting.sortBy} currentSortOrder={sorting.sortOrder} onSort={handleSort} className="py-3 border-0 small fw-bold text-muted text-center" />
+                  <th className="py-3 border-0 small fw-bold text-muted text-center px-4">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={9}>
+                      <Loader text="Fetching Voucher Records..." />
+                    </td>
+                  </tr>
+                ) : (
+                  <>
+                    {paginatedItems.map((voucher, index) => (
+                      <tr key={voucher.id} onClick={() => router.push(`/vouchers/${voucher.id}`)} style={{ cursor: 'pointer' }} className="table-row-hover">
+                        <td className="px-4 text-nowrap text-muted small">{(pagination.currentPage - 1) * pagination.itemsPerPage + index + 1}</td>
+                        <td className="text-nowrap fw-bold text-dark">
+                          <Link href={`/vouchers/${voucher.id}`} className="text-dark fw-bold text-decoration-none hover-underline" onClick={(e) => e.stopPropagation()}>{voucher.voucherNo}</Link>
+                          <div className={`x-small text-capitalize fw-normal ${getTypeColor(voucher.type)}`}>
+                            {voucher.type}
+                          </div>
+                        </td>
+                        <td className="text-nowrap text-muted small">{voucher.date ? new Date(voucher.date).toLocaleDateString('en-GB').replace(/\//g, '-') : '-'}</td>
+                        <td className="text-nowrap text-muted small">
+                          <div className="fw-bold text-dark">{voucher.partyName}</div>
+                          <div className="x-small text-truncate" style={{ maxWidth: '150px' }}>{voucher.description?.replace(/^Migrated\s+/i, '')}</div>
+                        </td>
+                        <td className="text-nowrap text-end fw-bold">
+                          <span className={voucher.type === 'payment' ? 'text-danger' : 'text-success'}>
+                            ₹{voucher.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          </span>
+                        </td>
+                        <td className="text-nowrap text-end fw-bold text-muted small">
+                          {(voucher.tdsAmount || 0) > 0 ? `₹${voucher.tdsAmount?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td className="text-nowrap text-end fw-bold text-muted small">
+                          {(voucher.othersAmount || 0) > 0 ? `₹${voucher.othersAmount?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td className="text-nowrap text-muted small text-capitalize fw-bold">{voucher.paymentMode}</td>
+                        <td className="text-center">
+                          <span className="badge bg-light text-dark border-0 shadow-sm x-small fw-bold text-capitalize">
+                            {voucher.status}
+                          </span>
+                        </td>
+                        <td className="text-center px-4 text-nowrap">
+                          <div className="d-flex justify-content-center gap-1">
+                            {mounted && checkActionPermission(user, 'mod_voucher', 'edit') && (
+                              <>
+                                <Link href={`/vouchers/${voucher.id}`} className="btn-action-view" title="View Detail" onClick={(e) => e.stopPropagation()}>
+                                  <i className="bi bi-eye-fill"></i>
+                                </Link>
+                                <Link href={`/vouchers/${voucher.id}?edit=true`} className="btn-action-edit" title="Edit Voucher" onClick={(e) => e.stopPropagation()}>
+                                  <i className="bi bi-pencil-fill"></i>
+                                </Link>
+                              </>
+                            )}
+                            
+                            <div className="dropdown">
+                              <button 
+                                className="btn btn-sm btn-outline-secondary border-0 text-muted p-0 ms-1 d-flex align-items-center justify-content-center" 
+                                type="button" 
+                                id={`actions-${voucher.id}`} 
+                                data-bs-toggle="dropdown" 
+                                aria-expanded="false"
+                                onClick={(e) => e.stopPropagation()}
+                                style={{ width: '32px', height: '32px', borderRadius: '8px' }}
+                              >
+                                <i className="bi bi-three-dots-vertical fs-5"></i>
+                              </button>
+                              <ul className="dropdown-menu dropdown-menu-end shadow-sm border-0 rounded-3 py-2" aria-labelledby={`actions-${voucher.id}`}>
+                                <li>
+                                  <button className="dropdown-item d-flex align-items-center gap-2 py-2" type="button" onClick={() => handlePrintVoucherRecord(voucher)}>
+                                    <i className="bi bi-printer text-primary"></i>
+                                    <span className="small fw-semibold">Quick Print</span>
+                                  </button>
+                                </li>
+                                <li>
+                                  <button className="dropdown-item d-flex align-items-center gap-2 py-2" type="button" onClick={() => handleExportPDFVoucherRecord(voucher)}>
+                                    <i className="bi bi-file-earmark-pdf text-danger"></i>
+                                    <span className="small fw-semibold">Export PDF</span>
+                                  </button>
+                                </li>
+                                {mounted && checkActionPermission(user, 'mod_voucher', 'delete') && (
+                                  <>
+                                    <li><hr className="dropdown-divider opacity-50" /></li>
+                                    <li>
+                                      <button 
+                                        className="dropdown-item d-flex align-items-center gap-2 py-2 text-danger" 
+                                        type="button"
+                                        onClick={() => handleDeleteParams(voucher.id)}
+                                      >
+                                        <i className="bi bi-trash3"></i>
+                                        <span className="small fw-semibold">Remove Record</span>
+                                      </button>
+                                    </li>
+                                  </>
+                                )}
+                              </ul>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    {paginatedItems.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="text-center py-5 text-muted">
+                          No vouchers found matching your filters.
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 && (
+            <div className="px-4 py-3 border-top d-flex align-items-center justify-content-between">
+              <div className="text-muted small">
+                Showing {(pagination.currentPage - 1) * pagination.itemsPerPage + 1} to {Math.min(pagination.currentPage * pagination.itemsPerPage, pagination.totalItems)} of {pagination.totalItems} entries
+              </div>
+              <PaginationComponent 
+                currentPage={pagination.currentPage} 
+                totalPages={totalPages} 
+                onPageChange={(page) => dispatch(setVoucherPage(page))} 
+              />
+
+            </div>
+          )}
+        </div>
+      </div>
+
+      <ConfirmationModal 
+        isOpen={deleteModal.isOpen}
+        onClose={() => setDeleteModal({ isOpen: false, id: null })}
+        onConfirm={confirmDelete}
+        title="Delete Voucher Transaction"
+        message="Are you sure you want to remove this financial record? This may impact your ledger balances. This action is irreversible."
+      />
+
+      <style jsx>{`
+        .table-responsive {
+          min-height: 400px;
+          padding-bottom: 80px;
+        }
+        @media print {
+          :global(body *) { visibility: hidden; }
+          .table-responsive, .table-responsive * { visibility: visible; }
+          .table-responsive { position: absolute; left: 0; top: 0; width: 100%; }
+          .table th:last-child, .table td:last-child { display: none !important; }
+          .table { border: 1px solid #dee2e6 !important; width: 100% !important; }
+          :global(.sidebar), :global(.header), :global(.breadcrumb), .card-header, .pagination, .border-bottom { display: none !important; }
+        }
+      `}</style>
+      {/* Hidden Download Generator */}
+      {downloadingItem && (
+        <div style={{ position: 'absolute', left: '-9999px', top: '-9999px' }}>
+          <div ref={downloadRef}>
+            <IndustrialDocument data={downloadingItem} type="voucher" company={activeCompany!} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default VoucherPage;

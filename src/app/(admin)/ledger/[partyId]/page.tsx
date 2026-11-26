@@ -1,0 +1,720 @@
+'use client';
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import { useSelector, useDispatch } from 'react-redux';
+import { RootState } from '@/redux/store';
+import { fetchLedgerEntries, resetLedgerState } from '@/redux/features/ledgerSlice';
+import { fetchCustomers } from '@/redux/features/customerSlice';
+import { fetchVendors } from '@/redux/features/vendorSlice';
+import ModuleGuard from '@/components/ModuleGuard';
+import Loader from '@/components/Loader';
+import Link from 'next/link';
+import BackButton from '@/components/BackButton';
+import LedgerPrintTemplate from '@/modules/ledger/components/LedgerPrintTemplate';
+import PaginationComponent from '@/components/shared/Pagination';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
+
+export default function LedgerDetailPage() {
+  const params = useParams();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const dispatch = useDispatch();
+  
+  const [dateFrom, setDateFrom] = useState<string>(searchParams.get('dateFrom') || '');
+  const [dateTo, setDateTo] = useState<string>(searchParams.get('dateTo') || '');
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPageUI = 20;
+  const FETCH_LIMIT = 5000;
+
+  const [selectedYear, setSelectedYear] = useState<string>('');
+  const [selectedQuarter, setSelectedQuarter] = useState<string>('ALL');
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+
+
+
+  const applyYearQuarter = (year: string, quarter: string) => {
+    if (!year) return;
+
+    let startMonth = 0; // 0-indexed
+    let endMonth = 11;
+    let startDay = 1;
+    let endDay = 31;
+    
+    const cy = parseInt(year);
+    const startYear = cy;
+    const endYear = cy;
+    
+    if (quarter === 'Q1') {
+      startMonth = 0;
+      endMonth = 2;
+      endDay = 31;
+    } else if (quarter === 'Q2') {
+      startMonth = 3;
+      endMonth = 5;
+      endDay = 30;
+    } else if (quarter === 'Q3') {
+      startMonth = 6;
+      endMonth = 8;
+      endDay = 30;
+    } else if (quarter === 'Q4') {
+      startMonth = 9;
+      endMonth = 11;
+      endDay = 31;
+    } else {
+      startMonth = 0;
+      endMonth = 11;
+      endDay = 31;
+    }
+
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const fromStr = `${startYear}-${pad(startMonth + 1)}-${pad(startDay)}`;
+    const toStr = `${endYear}-${pad(endMonth + 1)}-${pad(endDay)}`;
+
+    setDateFrom(fromStr);
+    setDateTo(toStr);
+    setCurrentPage(1);
+  };
+
+  const handleYearChange = (year: string) => {
+    setSelectedYear(year);
+    if (!year) {
+      setDateFrom('');
+      setDateTo('');
+      setSelectedQuarter('ALL');
+      setCurrentPage(1);
+    } else {
+      applyYearQuarter(year, selectedQuarter);
+    }
+  };
+
+  const handleQuarterChange = (quarter: string) => {
+    setSelectedQuarter(quarter);
+    applyYearQuarter(selectedYear, quarter);
+  };
+
+  const partyId = params.partyId as string;
+  const reportContainerRef = React.useRef<HTMLDivElement>(null);
+
+  const { company: activeCompany } = useSelector((state: RootState) => state.auth);
+  const { items: allEntries, loading, filters, error: ledgerError } = useSelector((state: RootState) => state.ledger);
+  const { items: customers, loading: isCustomerLoading, error: customerError } = useSelector((state: RootState) => state.customers);
+  const { items: vendors, loading: isVendorLoading, error: vendorError } = useSelector((state: RootState) => state.vendors);
+  const { items: allInvoices = [] } = useSelector((state: RootState) => state.invoices) || {};
+
+  const yearsOptions = useMemo(() => {
+    const years = new Set<number>();
+    
+    // Add current year and some standard surrounding years
+    const currentYear = new Date().getFullYear();
+    years.add(currentYear);
+    years.add(currentYear - 1);
+    years.add(currentYear - 2);
+    years.add(currentYear - 3);
+    years.add(currentYear - 4);
+    
+    // Collect all actual years from ledger entries data
+    allEntries.forEach(e => {
+      if (e.date) {
+        const y = new Date(e.date).getFullYear();
+        if (y > 2000) years.add(y);
+      }
+    });
+
+    return Array.from(years).sort((a, b) => b - a);
+  }, [allEntries]);
+
+  // 1. Identify Party
+  const party = useMemo(() => {
+    const cust = customers.find(c => String(c.id) === String(partyId));
+    if (cust) return { ...cust, partyType: 'customer' };
+    const vend = vendors.find(v => String(v.id) === String(partyId));
+    if (vend) return { ...vend, partyType: 'vendor' };
+    
+    // FALLBACK: If not found in master list but we have entries, 
+    // we can still show a basic ledger using the name from the entries
+    if (allEntries.length > 0) {
+      const first = allEntries[0];
+      return {
+        id: partyId,
+        name: first.partyName || 'Account Holder',
+        street1: 'Address details unavailable in master list',
+        partyType: first.partyType || 'customer'
+      };
+    }
+    return null;
+  }, [customers, vendors, partyId, allEntries]);
+
+  useEffect(() => {
+    if (activeCompany?.id) {
+      (dispatch as any)(fetchLedgerEntries({ 
+        partyId, 
+        companyId: activeCompany.id,
+        page: 1, // Always fetch full data from page 1
+        limit: FETCH_LIMIT, // Fetch all for reporting
+        dateFrom: dateFrom || filters.dateFrom,
+        dateTo: dateTo || filters.dateTo
+      }));
+
+      // Only fetch master party lists if they haven't been loaded in Redux yet
+      if (customers.length === 0) {
+        (dispatch as any)(fetchCustomers({ company_id: activeCompany.id, limit: 1000 }));
+      }
+      if (vendors.length === 0) {
+        (dispatch as any)(fetchVendors({ company_id: activeCompany.id, limit: 1000 }));
+      }
+    }
+    
+    return () => {
+      dispatch(resetLedgerState());
+    };
+  }, [dispatch, activeCompany?.id, partyId, dateFrom, dateTo, filters.dateFrom, filters.dateTo]);
+
+  useEffect(() => {
+    const download = searchParams.get('download') === 'true';
+    const print = searchParams.get('print') === 'true';
+
+    if (print && !download && !loading && party && allEntries.length > 0) {
+        const timer = setTimeout(() => {
+            window.print();
+        }, 800); 
+        return () => clearTimeout(timer);
+    }
+
+    if (download && !loading && party && allEntries.length > 0) {
+        const triggerDownload = async () => {
+            // Wait for images and layout to settle
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            if (reportContainerRef.current) {
+                const canvas = await html2canvas(reportContainerRef.current, {
+                    scale: 2,
+                    useCORS: true,
+                    logging: false,
+                    backgroundColor: '#ffffff'
+                });
+                const imgData = canvas.toDataURL('image/png');
+                if (!imgData || imgData === 'data:,' || !imgData.startsWith('data:image/')) return;
+                const pdf = new jsPDF('p', 'mm', 'a4');
+                const imgProps = pdf.getImageProperties(imgData);
+                const pdfWidth = pdf.internal.pageSize.getWidth();
+                const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+                pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+                pdf.save(`LEDGER_${party.name.toUpperCase()}_${new Date().toISOString().split('T')[0]}.pdf`);
+            }
+        };
+        triggerDownload();
+    }
+  }, [searchParams, loading, party, allEntries]);
+
+  // 2. Process Ledger Calculations
+  const { openingBalance: rawOpeningBalance, pagination: ledgerPagination } = useSelector((state: RootState) => state.ledger);
+
+  const processedData = useMemo(() => {
+    const isVendor = party?.partyType === 'vendor';
+    
+    // Use rawOpeningBalance from backend
+    let opBalance = isVendor ? -rawOpeningBalance : rawOpeningBalance;
+
+    let runningBalance = opBalance;
+    let periodDebitSum = 0;
+    let periodCreditSum = 0;
+
+    const sortedForBalance = [...allEntries].sort((a, b) => {
+        const dateA = new Date(a.date).getTime();
+        const dateB = new Date(b.date).getTime();
+        if (dateA !== dateB) return dateA - dateB;
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return timeA - timeB;
+    });
+
+    const mapped = sortedForBalance.map(e => {
+        const amt = parseFloat(String(e.amount || 0));
+        const isDebit = e.type === 'debit';
+        const isCredit = e.type === 'credit';
+
+        if (isDebit) periodDebitSum += amt;
+        if (isCredit) periodCreditSum += amt;
+
+        if (isVendor) {
+            runningBalance += (isCredit ? amt : -amt);
+        } else {
+            runningBalance += (isDebit ? amt : -amt);
+        }
+
+        return {
+            ...e,
+            debitValue: isDebit ? amt : 0,
+            creditValue: isCredit ? amt : 0,
+            runningBalance
+        };
+    });
+
+    const isDebitOp = isVendor ? opBalance < 0 : opBalance >= 0;
+
+    return {
+      processedEntries: [...mapped].reverse(), // Back to DESC for display
+      openingBalance: Math.abs(opBalance),
+      isDebitOpening: opBalance !== 0 ? isDebitOp : (isVendor ? false : true),
+      totalDebit: periodDebitSum,
+      totalCredit: periodCreditSum,
+      closingBalance: runningBalance
+    };
+  }, [allEntries, party, rawOpeningBalance]);
+
+  const { 
+    processedEntries, 
+    openingBalance, 
+    totalDebit, 
+    totalCredit, 
+    closingBalance,
+    isDebitOpening
+  } = processedData;
+
+  const totalPagesUI = Math.ceil(processedEntries.length / itemsPerPageUI);
+  const paginatedEntries = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPageUI;
+    return processedEntries.slice(start, start + itemsPerPageUI);
+  }, [processedEntries, currentPage]);
+
+  const handlePrint = () => { window.print(); };
+
+  const handleExportPDF = async () => {
+    if (!reportContainerRef.current || isExporting) return;
+    try {
+      setIsExporting(true);
+      // Brief pause to allow any rendering to settle
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      const canvas = await html2canvas(reportContainerRef.current, { 
+        scale: 2, 
+        useCORS: true, 
+        logging: false,
+        backgroundColor: '#ffffff'
+      });
+      const imgData = canvas.toDataURL('image/png');
+      if (!imgData || imgData === 'data:,' || !imgData.startsWith('data:image/')) {
+        throw new Error('Canvas capture produced empty or invalid image data');
+      }
+      
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = pdf.internal.pageSize.getHeight();
+      
+      const imgProps = pdf.getImageProperties(imgData);
+      const imgWidth = pdfWidth;
+      const imgHeight = (imgProps.height * imgWidth) / imgProps.width;
+      
+      let heightLeft = imgHeight;
+      let position = 0;
+
+      // Add first page
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pdfHeight;
+
+      // Add additional pages if content exceeds one page
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+        heightLeft -= pdfHeight;
+      }
+      
+      const cleanPartyName = party?.name ? party.name.replace(/[^a-zA-Z0-9_-]/g, '_').toUpperCase() : 'STATEMENT';
+      pdf.save(`LEDGER_${cleanPartyName}_${new Date().toISOString().split('T')[0]}.pdf`);
+    } catch (err) {
+      console.error('PDF export failed:', err);
+      alert('Unable to generate PDF statement directly. Please use the PRINT button and select "Save as PDF".');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // Only show loader if we are actually fetching and don't have the party yet
+  if ((loading || isCustomerLoading || isVendorLoading) && !party) {
+    return <Loader text="Syncing Statement..." />;
+  }
+
+  // If loading is done and still no party, show error
+  if (!party) {
+    return (
+      <div className="container-fluid py-5 text-center">
+        <div className="alert alert-warning d-inline-block px-5 py-4 rounded-4 shadow-sm">
+            <h2 className="text-warning-emphasis fw-bold mb-3"><i className="bi bi-exclamation-triangle-fill me-2"></i>Account Not Identified</h2>
+            <p className="mb-0 text-muted">The ledger ID <strong>{partyId}</strong> was not found in your current company database.</p>
+            {ledgerError && <div className="mt-3 text-danger small"><strong>Ledger Error:</strong> {ledgerError}</div>}
+            {customerError && <div className="text-danger small"><strong>Customer Fetch Error:</strong> {customerError}</div>}
+            {vendorError && <div className="text-danger small"><strong>Vendor Fetch Error:</strong> {vendorError}</div>}
+            <div className="mt-4 d-flex gap-2 justify-content-center">
+                <Link href="/ledger" className="btn btn-primary px-4 fw-bold rounded-pill shadow-sm">Back to Ledger</Link>
+                <button onClick={() => window.location.reload()} className="btn btn-outline-secondary px-4 fw-bold rounded-pill">Retry Sync</button>
+            </div>
+        </div>
+      </div>
+    );
+  }
+
+  const isVendor = party?.partyType === 'vendor';
+
+  return (
+    <ModuleGuard moduleId="mod_ledger">
+      <div className="container-fluid py-4 min-vh-100 bg-light-subtle px-4">
+        
+        {/* STATEMENT HEADER (Professional) */}
+        <div className="card border-0 shadow-sm rounded-4 overflow-hidden mb-4 bg-white ledger-statement-header hide-print" style={{ borderLeftColor: isVendor ? '#6f42c1' : '#0d6efd' }}>
+           <div className="card-body p-4 p-lg-5">
+              <div className="d-flex justify-content-between align-items-start mb-5">
+                 <div>
+                    <div className="d-flex align-items-center gap-3 mb-2">
+                        <BackButton href="/ledger" title="Back to Ledger" className="hide-print" />
+                        <h1 className="fw-900 mb-0 tracking-tight" style={{ color: 'var(--accent-color)' }}>GLOBUS ENGINEERING</h1>
+                    </div>
+                    <p className="text-muted small fw-bold text-capitalize tracking-widest mb-0 opacity-75">Professional Account Ledger Statement</p>
+                 </div>
+                   <div className="text-end d-flex gap-2 hide-print">
+                     <button onClick={handlePrint} className="btn btn-outline-dark rounded-pill px-4 fw-bold shadow-sm d-flex align-items-center gap-2">
+                         <i className="bi bi-printer-fill"></i> PRINT
+                     </button>
+                     <button 
+                       onClick={handleExportPDF} 
+                       disabled={isExporting}
+                       className="btn btn-primary rounded-pill px-4 fw-bold shadow-sm d-flex align-items-center gap-2"
+                     >
+                         {isExporting ? (
+                           <>
+                             <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                             <span>GENERATING...</span>
+                           </>
+                         ) : (
+                           <>
+                             <i className="bi bi-file-earmark-pdf-fill"></i> EXPORT PDF
+                           </>
+                         )}
+                     </button>
+                   </div>
+              </div>
+
+              <div className="row g-4 border-top pt-4">
+                 <div className="col-md-5">
+                    <span className="text-muted x-small fw-800 text-capitalize tracking-wider d-block mb-2">Account Holder</span>
+                    <h3 className="fw-900 mb-1 text-dark">{party?.name}</h3>
+                    <p className="text-muted small mb-0">{party?.street1 || 'No address specified'}</p>
+                 </div>
+                 <div className="col-md-3 border-start">
+                     <span className="text-muted x-small fw-800 text-capitalize tracking-wider d-block mb-2">Statement Period</span>
+                     <div className="d-flex flex-column gap-1">
+                        <div className="d-flex gap-1 mb-1 hide-print">
+                            <select 
+                                className="form-select form-select-sm border-0 bg-light shadow-none text-muted py-1"
+                                style={{ fontSize: '0.75rem', height: '30px' }}
+                                value={selectedYear}
+                                onChange={e => handleYearChange(e.target.value)}
+                            >
+                                <option value="">Custom Year</option>
+                                {yearsOptions.map(yr => (
+                                    <option key={yr} value={String(yr)}>{yr}</option>
+                                ))}
+                            </select>
+                            <select 
+                                className="form-select form-select-sm border-0 bg-light shadow-none text-muted py-1"
+                                style={{ fontSize: '0.75rem', height: '30px' }}
+                                value={selectedQuarter}
+                                onChange={e => handleQuarterChange(e.target.value)}
+                                disabled={!selectedYear}
+                            >
+                                <option value="ALL">All</option>
+                                <option value="Q1">Q1</option>
+                                <option value="Q2">Q2</option>
+                                <option value="Q3">Q3</option>
+                                <option value="Q4">Q4</option>
+                            </select>
+                        </div>
+                        <input type="date" className="form-control form-control-sm border-0 bg-light hide-print mb-1" value={dateFrom} onChange={e => {setDateFrom(e.target.value); setSelectedYear(""); setSelectedQuarter("ALL"); setCurrentPage(1);}} />
+                        <input type="date" className="form-control form-control-sm border-0 bg-light hide-print" value={dateTo} onChange={e => {setDateTo(e.target.value); setSelectedYear(""); setSelectedQuarter("ALL"); setCurrentPage(1);}} />
+                        <span className="small fw-bold text-dark show-print-only">
+                            {dateFrom || 'Start'} to {dateTo || 'Today'}
+                        </span>
+                     </div>
+                 </div>
+                 <div className="col-md-4 border-start text-end">
+                    <div className="px-3">
+                         <span className="text-muted x-small fw-800 text-capitalize tracking-wider d-block mb-2">Current Balance Status</span>
+                         <h2 className={`fw-900 mb-0 text-nowrap ${closingBalance >= 0 ? 'text-success' : 'text-danger'}`} style={{ fontSize: '2.5rem' }}>
+                             ₹ {Math.abs(closingBalance).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                         </h2>
+                         <span className="small fw-bold opacity-75">{closingBalance >= 0 ? (isVendor ? 'Payable Amount' : 'Receivable Amount') : (isVendor ? 'Adv Paid' : 'Excess Paid')}</span>
+                    </div>
+                 </div>
+              </div>
+           </div>
+        </div>
+
+        {/* SUMMARY TILES */}
+        <div className="row g-4 mb-4 hide-print">
+            <div className="col-md-4">
+                <div className="card border-0 shadow-sm rounded-4 h-100 bg-white">
+                    <div className="card-body p-4">
+                        <div className="d-flex align-items-center justify-content-between">
+                            <div>
+                                <span className="text-muted x-small fw-800 text-capitalize tracking-wider mb-1 d-block">Total Debits</span>
+                                <h4 className="fw-900 text-danger mb-0 text-nowrap">₹ {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h4>
+                            </div>
+                            <div className="bg-danger-subtle p-3 rounded-4"><i className="bi bi-dash-circle text-danger fs-4"></i></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div className="col-md-4">
+                <div className="card border-0 shadow-sm rounded-4 h-100 bg-white">
+                    <div className="card-body p-4">
+                        <div className="d-flex align-items-center justify-content-between">
+                            <div>
+                                <span className="text-muted x-small fw-800 text-capitalize tracking-wider mb-1 d-block">Total Credits</span>
+                                <h4 className="fw-900 text-success mb-0 text-nowrap">₹ {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h4>
+                            </div>
+                            <div className="bg-success-subtle p-3 rounded-4"><i className="bi bi-plus-circle text-success fs-4"></i></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div className="col-md-4">
+                <div className="card border-0 shadow-sm rounded-4 h-100" style={{ backgroundColor: 'var(--accent-soft)' }}>
+                    <div className="card-body p-4 text-center">
+                         <span className="text-muted x-small fw-800 text-capitalize tracking-wider mb-1 d-block opacity-75">Total Ledger Records</span>
+                         <h4 className="fw-900 mb-0" style={{ color: 'var(--accent-color)' }}>{processedEntries.length} Transactions</h4>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+         {/* LEDGER TABLE (Professional Design) */}
+        <div className="card border-0 shadow-sm rounded-4 overflow-hidden bg-white hide-print">
+            <div className="table-responsive" style={{ minHeight: '600px' }}>
+                <table className="table ledger-professional-table mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th className="ps-5 py-4 text-capitalize fw-800 x-small text-muted tracking-widest border-0">Date</th>
+                            <th className="py-4 text-capitalize fw-800 x-small text-muted tracking-widest border-0" style={{ width: '35%' }}>Particulars (Transaction Details)</th>
+                            <th className="py-4 text-capitalize fw-800 x-small text-muted tracking-widest border-0">Vch Type</th>
+                            <th className="py-4 text-capitalize fw-800 x-small text-muted tracking-widest border-0">Vch No</th>
+                            <th className="py-4 text-capitalize fw-800 x-small text-muted tracking-widest border-0 text-center">Status</th>
+                            <th className="py-4 text-capitalize fw-800 x-small text-muted tracking-widest border-0 text-end text-nowrap">Debit (Dr)</th>
+                            <th className="py-4 text-capitalize fw-800 x-small text-muted tracking-widest border-0 text-end text-nowrap">Credit (Cr)</th>
+                            <th className="pe-5 py-4 text-capitalize fw-800 x-small text-muted tracking-widest border-0 text-end text-nowrap">Net Balance</th>
+                        </tr>
+                    </thead>
+                    <tbody className="border-top-0">
+                        {paginatedEntries.length === 0 && (
+                            <tr><td colSpan={8} className="text-center py-5 text-muted">No transactions found for this period.</td></tr>
+                        )}
+                        {paginatedEntries.map((e, idx) => (
+                            <tr key={e.id} className="ledger-row border-bottom border-light-subtle">
+                                <td className="ps-5 py-3 small fw-bold text-muted">{new Date(e.date).toLocaleDateString()}</td>
+                                <td className="py-3">
+                                    <div className="fw-800 text-dark small text-capitalize" style={{ letterSpacing: '0.01em' }}>
+                                      {(() => {
+                                        if (e.vchType === 'INVOICE') return 'GST Sales';
+                                        if (e.vchType === 'RECEIPT' || e.vchType === 'PAYMENT') {
+                                          const desc = e.description || '';
+                                          
+                                          // 1. Check if it matches a legacy migrated invoice receipt
+                                          const invMatch = desc.match(/(?:Receipt for Inv:|Migrated Receipt for Inv:)\s*(\d+)/i);
+                                          if (invMatch) {
+                                            const invNo = invMatch[1].trim();
+                                            const invoice = allInvoices.find(inv => String(inv.invoiceNumber || (inv as any).invoice_no || '') === invNo);
+                                             if (invoice && ((invoice as any).chequeNo || (invoice as any).cheque_no)) {
+                                               return (invoice as any).chequeNo || (invoice as any).cheque_no;
+                                             }
+                                          }
+
+                                          // 2. Format payment modes cleanly
+                                          let cleanDesc = desc.replace(/^(RECEIPT|PAYMENT)\s*-\s*/i, '');
+                                          
+                                          if (cleanDesc.includes('|')) {
+                                            const parts = cleanDesc.split('|').map((p: string) => p.trim());
+                                            const mode = parts[1].toUpperCase();
+                                            const modeLabels: Record<string, string> = {
+                                              CASH: 'Cash', NEFT: 'NEFT', RTGS: 'RTGS',
+                                              CHEQUE: 'Cheque', UPI: 'UPI', ONLINE: 'Online', BANK: 'Bank',
+                                            };
+                                            return `${modeLabels[mode] || mode} (${parts[0]})`;
+                                          }
+                                          
+                                          const uppercaseDesc = cleanDesc.toUpperCase();
+                                          const rawModeLabels: Record<string, string> = {
+                                            CASH: 'Cash', NEFT: 'NEFT', RTGS: 'RTGS',
+                                            CHEQUE: 'Cheque', UPI: 'UPI', ONLINE: 'Online', BANK: 'Bank',
+                                          };
+                                          if (rawModeLabels[uppercaseDesc]) {
+                                            return rawModeLabels[uppercaseDesc];
+                                          }
+
+                                          return cleanDesc.replace(/^Migrated\s+/i, '') || 'Receipt';
+                                        }
+                                        return e.description || '-';
+                                      })()}
+                                    </div>
+                                </td>
+                                <td className="py-3">
+                                    <span className={`badge border py-2 px-3 fw-800 x-small text-capitalize tracking-wider rounded-pill shadow-none ${
+                                        e.vchType === 'INVOICE' ? 'bg-primary-subtle text-primary border-primary-subtle' :
+                                        (e.vchType === 'PAYMENT' || e.vchType === 'RECEIPT') ? 'bg-success-subtle text-success border-success-subtle' :
+                                        e.vchType === 'OUTWARD' ? 'bg-purple-subtle text-purple border-purple-subtle' :
+                                        'bg-light text-dark border-secondary-subtle'
+                                    }`}>
+                                        {e.vchType === 'INVOICE' ? 'SALES' : e.vchType === 'RECEIPT' ? 'RECEIPT' : e.vchType || 'JOURNAL'}
+                                    </span>
+                                </td>
+                                <td className="py-3 small fw-bold text-muted">{e.vchNo?.replace(/^REC-/i, '') || '-'}</td>
+                                <td className="py-3 text-center">
+                                    {(() => {
+                                      // DYNAMIC STATUS CHECK
+                                      const linkedId = e.vchNo || e.referenceNo;
+                                      const targetInv = allInvoices.find(inv => 
+                                        String(inv.id) === String(linkedId) || 
+                                        String(inv.invoiceNumber) === String(e.vchNo)
+                                      );
+
+                                      if (targetInv) {
+                                        const isActuallyPaid = targetInv.status?.toLowerCase() === 'paid';
+                                        return (
+                                          <span className={`badge rounded-pill fw-900 x-small px-3 py-1 ${isActuallyPaid ? 'bg-success text-white' : 'bg-warning-subtle text-warning border border-warning-subtle'}`}>
+                                            {isActuallyPaid ? 'PAID' : 'DUE'}
+                                          </span>
+                                        );
+                                      }
+                                      
+                                      const isSettlement = isVendor ? e.debitValue > 0 : e.creditValue > 0;
+                                      if (isSettlement) {
+                                        return (
+                                          <span className="badge rounded-pill fw-900 x-small px-3 py-1 bg-success text-white">
+                                            {e.vchType === 'JOURNAL' ? 'ADJUSTED' : 'PAID'}
+                                          </span>
+                                        );
+                                      }
+
+                                      return (
+                                        <span className="badge rounded-pill fw-900 x-small px-3 py-1 bg-warning-subtle text-warning border border-warning-subtle">
+                                          DUE
+                                        </span>
+                                      );
+                                    })()}
+                                </td>
+                                <td className={`py-3 text-end fw-bold text-nowrap ${e.debitValue > 0 ? 'text-danger' : 'text-muted opacity-50'}`}>
+                                    {e.debitValue > 0 ? e.debitValue.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '-'}
+                                </td>
+                                <td className={`py-3 text-end fw-bold text-nowrap ${e.creditValue > 0 ? 'text-success' : 'text-muted opacity-50'}`}>
+                                    {e.creditValue > 0 ? e.creditValue.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '-'}
+                                </td>
+                                <td className="pe-5 py-3 text-end fw-900 border-start bg-light bg-opacity-25 text-nowrap" style={{ fontSize: '10.5pt' }}>
+                                    ₹ {Math.abs(e.runningBalance).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        {/* PAGINATION UI */}
+        {totalPagesUI > 1 && (
+            <div className="d-flex justify-content-between align-items-center mt-4 hide-print">
+                <span className="text-muted small">
+                    Showing {(currentPage - 1) * itemsPerPageUI + 1} to {Math.min(currentPage * itemsPerPageUI, processedEntries.length)} of {processedEntries.length} entries
+                </span>
+                <PaginationComponent 
+                    currentPage={currentPage} 
+                    totalPages={totalPagesUI} 
+                    onPageChange={(page) => setCurrentPage(page)} 
+                />
+            </div>
+        )}
+
+        {/* LEDGER PRINT & PDF EXPORT VIEW (Standard Accounting Format) */}
+        <div className="ledger-print-wrapper" ref={reportContainerRef}>
+            <LedgerPrintTemplate 
+                party={party!} 
+                entries={allEntries} 
+                company={activeCompany} 
+                dateFrom={dateFrom} 
+                dateTo={dateTo} 
+                openingBalance={openingBalance}
+                isDebitOpening={isDebitOpening}
+            />
+        </div>
+
+        <style jsx>{`
+            .fw-900 { font-weight: 900; }
+            .fw-800 { font-weight: 800; }
+            .x-small { font-size: 0.70rem; }
+            .bg-purple-subtle { background-color: #f3e8ff; }
+            .text-purple { color: #6f42c1; }
+            .border-purple-subtle { border-color: #e9d5ff !important; }
+            .ledger-statement-header { border-left: 8px solid #0d6efd; }
+            .ledger-professional-table th { background-color: #f8fafc; border-bottom: 2px solid #e2e8f0 !important; }
+            .ledger-row:hover { background-color: #f7f9fc; }
+            .show-print-only { display: none; }
+
+            /* Offscreen positioning for PDF capture while rendering on screen */
+            .ledger-print-wrapper {
+                position: fixed;
+                left: -9999px;
+                top: 0;
+                width: 210mm;
+                background-color: #ffffff;
+                z-index: -9999;
+                pointer-events: none;
+            }
+            
+            .ledger-print-table { border-collapse: collapse; font-family: var(--font-inter), Inter, sans-serif; font-size: 9pt; }
+            .ledger-print-table th { font-weight: bold; border-color: #000 !important; }
+            .ledger-print-table td { padding: 4px; vertical-align: top; }
+
+            @media print {
+                .hide-print { display: none !important; }
+                .show-print-only { display: block !important; }
+                .ledger-print-wrapper {
+                    position: static !important;
+                    left: auto !important;
+                    top: auto !important;
+                    width: 100% !important;
+                    display: block !important;
+                    z-index: auto !important;
+                    pointer-events: auto !important;
+                    background-color: transparent !important;
+                }
+
+                /* Collapse the page shell — no height, no padding, no min-height */
+                html, body {
+                    height: auto !important;
+                    min-height: 0 !important;
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    background: white !important;
+                    color: black !important;
+                }
+                .container-fluid {
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    height: auto !important;
+                    min-height: 0 !important;
+                }
+                .min-vh-100 {
+                    min-height: 0 !important;
+                    height: auto !important;
+                }
+                .card { border: none !important; box-shadow: none !important; border-radius: 0 !important; }
+                .ledger-statement-header { display: none !important; }
+                .bg-light-subtle { background-color: white !important; }
+                .ledger-print-container { padding: 10mm; color: black; }
+                .ledger-print-table { color: black !important; border-color: black !important; }
+                .ledger-print-table th { background-color: transparent !important; color: black !important; }
+                .table-responsive { overflow: visible !important; }
+                .border-dark { border-color: black !important; }
+            }
+        `}</style>
+      </div>
+    </ModuleGuard>
+  );
+}

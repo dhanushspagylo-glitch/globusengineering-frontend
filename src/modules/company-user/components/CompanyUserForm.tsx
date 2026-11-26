@@ -1,0 +1,432 @@
+'use client';
+
+import React, { useState, useEffect, useMemo } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { useRouter } from 'next/navigation';
+import { RootState } from '@/redux/store';
+import { addUser, updateUser } from '@/redux/features/companyUserSlice';
+import FullPageStatus from '@/components/FullPageStatus';
+import { User, ModulePermission } from '@/types/modules';
+
+interface CompanyUserFormProps {
+  initialData?: User;
+  mode: 'create' | 'edit' | 'view';
+}
+
+const CompanyUserForm: React.FC<CompanyUserFormProps> = ({ initialData, mode }) => {
+  const { user: currentUser, company } = useSelector((state: RootState) => state.auth);
+  const { items: allModules } = useSelector((state: RootState) => state.modules);
+  const dispatch = useDispatch();
+  const router = useRouter();
+
+  // Memoize company modules to prevent infinite update loops in useEffect
+  const companyModules = useMemo(() => {
+    if (!company) return allModules;
+    const active = company.activeModules || [];
+    return active.length > 0 
+      ? allModules.filter(m => active.includes(m.id))
+      : allModules;
+  }, [company, allModules]);
+
+  const [formData, setFormData] = useState({
+    name: '',
+    email: '',
+    password: '', // New password field
+    role: 'staff' as User['role'],
+    assignedArea: '',
+  });
+
+  const [modulePermissions, setModulePermissions] = useState<ModulePermission[]>([]);
+  const [modal, setModal] = useState<{ isOpen: boolean; type: 'success' | 'error'; title: string; message: string }>({
+    isOpen: false,
+    type: 'success',
+    title: '',
+    message: ''
+  });
+
+  useEffect(() => {
+    if (initialData) {
+      setFormData({
+        name: initialData.name,
+        email: initialData.email,
+        role: initialData.role,
+        assignedArea: initialData.assignedArea || '',
+        password: '', // Initialize password as empty for edit mode
+      });
+      setModulePermissions(initialData.modulePermissions || []);
+    } else {
+      // Default permissions for new user
+      const defaultPerms: ModulePermission[] = companyModules.map(m => {
+        // Auto-tick logic for Sales/Staff
+        const isAutoTickModule = ['mod_lead', 'mod_stores', 'mod_store_visits'].includes(m.id);
+        const shouldTickAll = (formData.role === 'sales' || formData.role === 'staff') && isAutoTickModule;
+
+        return {
+          moduleId: m.id,
+          canRead: true,
+          canCreate: shouldTickAll,
+          canEdit: shouldTickAll,
+          canDelete: false
+        };
+      });
+      setModulePermissions(defaultPerms);
+    }
+  }, [initialData, companyModules, formData.role]);
+
+  const handleFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  const handlePermissionToggle = (moduleId: string, action: keyof Omit<ModulePermission, 'moduleId'>) => {
+    setModulePermissions(prev => {
+      const existing = prev.find(p => p.moduleId === moduleId);
+      if (existing) {
+        return prev.map(p => p.moduleId === moduleId ? { ...p, [action]: !p[action] } : p);
+      } else {
+        return [...prev, { moduleId, canRead: false, canCreate: false, canEdit: false, canDelete: false, [action]: true }];
+      }
+    });
+  };
+
+  const handleModuleToggle = (moduleId: string) => {
+    setModulePermissions(prev => {
+      const existing = prev.find(p => p.moduleId === moduleId);
+      if (existing) {
+        return prev.map(p => p.moduleId === moduleId ? { ...p, canRead: !p.canRead } : p);
+      } else {
+        return [...prev, { moduleId, canRead: true, canCreate: false, canEdit: false, canDelete: false }];
+      }
+    });
+  };
+
+  const handleSelectAll = () => {
+    setModulePermissions(companyModules.map(m => ({
+      moduleId: m.id,
+      canRead: true,
+      canCreate: true,
+      canEdit: true,
+      canDelete: true
+    })));
+  };
+
+  const handleDeselectAll = () => {
+    setModulePermissions(companyModules.map(m => ({
+      moduleId: m.id,
+      canRead: false,
+      canCreate: false,
+      canEdit: false,
+      canDelete: false
+    })));
+  };
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!formData.name || !String(formData.name).trim()) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'User Name Required',
+        message: 'Please enter the User Full Name.'
+      });
+      return;
+    }
+
+    if (!formData.email || !String(formData.email).trim()) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Email Required',
+        message: 'Please enter the user email address.'
+      });
+      return;
+    }
+
+    if (mode === 'create' && (!formData.password || !String(formData.password).trim())) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Password Required',
+        message: 'Please enter a password for the new user.'
+      });
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      // Generate legacy permissions from the new module permissions for compatibility
+      const legacyPermissions = modulePermissions
+        .filter(p => p.canRead)
+        .map(p => {
+          const modName = p.moduleId.replace('mod_', '');
+          return `view_${modName}`;
+        });
+        
+      if (formData.role === 'company_admin' || formData.role === 'super_admin') {
+        legacyPermissions.push('all');
+      }
+
+      // Clean up module permissions: only save what is actually active for the company
+      const activeModules = company?.activeModules || [];
+      const cleanedModulePermissions = activeModules.length > 0 
+        ? modulePermissions.filter(p => activeModules.includes(p.moduleId))
+        : modulePermissions;
+      
+      const userData = {
+        name: formData.name,
+        email: formData.email,
+        role: formData.role,
+        assigned_area: formData.assignedArea,
+        company_id: company?.id || currentUser?.company_id,
+        permissions: legacyPermissions, // Legacy column
+        modulePermissions: cleanedModulePermissions, // New detailed column
+        password: formData.password || 'password123'
+      };
+
+      if (mode === 'create') {
+        await (dispatch as any)(addUser(userData)).unwrap();
+        setModal({
+          isOpen: true,
+          type: 'success',
+          title: 'User Created',
+          message: `Account for ${formData.name} has been successfully provisioned.`
+        });
+      } else {
+        await (dispatch as any)(updateUser({ id: initialData!.id, ...userData } as any)).unwrap();
+        setModal({
+          isOpen: true,
+          type: 'success',
+          title: 'Update Successful',
+          message: 'User profile and permissions have been updated.'
+        });
+      }
+    } catch (err: any) {
+      setModal({
+        isOpen: true,
+        type: 'error',
+        title: 'Save Failed',
+        message: err.message || 'Failed to process user account updates.'
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="card border-0 shadow-sm">
+      <div className="card-body p-4">
+        <form onSubmit={handleSubmit}>
+          <div className="row g-4 mb-5">
+            <h5 className="fw-bold mb-0">Basic Information</h5>
+            <div className="col-md-4">
+              <label className="form-label fw-semibold small text-muted text-uppercase tracking-wider">Full Name</label>
+              <input
+                type="text"
+                className="form-control shadow-none"
+                name="name"
+                value={formData.name}
+                onChange={handleFormChange}
+                required
+                disabled={mode === 'view'}
+              />
+            </div>
+            <div className="col-md-4">
+              <label className="form-label fw-semibold small text-muted text-uppercase tracking-wider">Email Address</label>
+              <input
+                type="email"
+                className="form-control shadow-none"
+                name="email"
+                value={formData.email}
+                onChange={handleFormChange}
+                required
+                disabled={mode === 'view'}
+              />
+            </div>
+            {mode === 'create' && (
+              <div className="col-md-4">
+                <label className="form-label fw-semibold small text-muted text-uppercase tracking-wider">Default Password</label>
+                <input
+                  type="password"
+                  className="form-control shadow-none"
+                  name="password"
+                  placeholder="Set login password"
+                  value={formData.password}
+                  onChange={handleFormChange}
+                  required={mode === 'create'}
+                />
+              </div>
+            )}
+            <div className="col-md-3">
+              <label className="form-label fw-semibold small text-muted text-uppercase tracking-wider">System Role</label>
+              <select
+                className="form-select shadow-none"
+                name="role"
+                value={formData.role}
+                onChange={handleFormChange}
+                required
+                disabled={mode === 'view'}
+              >
+                {currentUser?.role === 'super_admin' && (
+                  <option value="super_admin">Super Admin</option>
+                )}
+                <option value="company_admin">Company Admin</option>
+                <option value="manager">Manager</option>
+                <option value="sales">Sales (Field Staff)</option>
+                <option value="staff">Staff / Operations</option>
+              </select>
+            </div>
+            <div className="col-md-3">
+              <label className="form-label fw-semibold small text-muted text-uppercase tracking-wider">Assigned Area</label>
+              <input
+                type="text"
+                className="form-control shadow-none"
+                name="assignedArea"
+                value={formData.assignedArea}
+                onChange={handleFormChange}
+                placeholder="Ex. North Zone"
+                disabled={mode === 'view' || formData.role !== 'sales'}
+              />
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <div className="d-flex justify-content-between align-items-center mb-3">
+              <div>
+                <h5 className="fw-bold mb-1">Module Access & Permissions</h5>
+                <p className="text-muted small mb-0">Granularly control which modules this user can access and what actions they can perform.</p>
+              </div>
+              {mode !== 'view' && (
+                <div className="d-flex gap-2">
+                  <button type="button" className="btn btn-sm btn-outline-primary px-3 rounded-pill fw-bold" onClick={handleSelectAll}>Select All</button>
+                  <button type="button" className="btn btn-sm btn-outline-secondary px-3 rounded-pill fw-bold" onClick={handleDeselectAll}>Deselect All</button>
+                </div>
+              )}
+            </div>
+            
+            <div className="table-responsive">
+              <table className="table table-bordered align-middle">
+                <thead className="table-light">
+                  <tr>
+                    <th style={{ width: '250px' }}>Module Name</th>
+                    <th className="text-center">Read Access</th>
+                    <th className="text-center">Create</th>
+                    <th className="text-center">Edit / Update</th>
+                    <th className="text-center">Delete</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {companyModules.map(module => {
+                    const perm = modulePermissions.find(p => p.moduleId === module.id) || {
+                      moduleId: module.id,
+                      canRead: false,
+                      canCreate: false,
+                      canEdit: false,
+                      canDelete: false
+                    };
+
+                    return (
+                      <tr key={module.id}>
+                        <td className="ps-3">
+                          <div className="d-flex align-items-center">
+                            <i className={`bi ${module.icon} text-primary me-2`}></i>
+                            <span className="fw-bold small text-dark">{module.name}</span>
+                          </div>
+                        </td>
+                        <td className="text-center">
+                          <div className="form-check form-switch d-inline-block">
+                            <input 
+                              className="form-check-input cursor-pointer" 
+                              type="checkbox" 
+                              checked={perm.canRead}
+                              onChange={() => handleModuleToggle(module.id)}
+                              disabled={mode === 'view'}
+                            />
+                          </div>
+                        </td>
+                        <td className="text-center">
+                          <div className="form-check form-switch d-inline-block">
+                            <input 
+                              type="checkbox" 
+                              className="form-check-input cursor-pointer"
+                              checked={perm.canCreate}
+                              disabled={!perm.canRead || mode === 'view'}
+                              onChange={() => handlePermissionToggle(module.id, 'canCreate')}
+                            />
+                          </div>
+                        </td>
+                        <td className="text-center">
+                          <div className="form-check form-switch d-inline-block">
+                            <input 
+                              type="checkbox" 
+                              className="form-check-input cursor-pointer"
+                              checked={perm.canEdit}
+                              disabled={!perm.canRead || mode === 'view'}
+                              onChange={() => handlePermissionToggle(module.id, 'canEdit')}
+                            />
+                          </div>
+                        </td>
+                        <td className="text-center">
+                          <div className="form-check form-switch d-inline-block">
+                            <input 
+                              type="checkbox" 
+                              className="form-check-input cursor-pointer"
+                              checked={perm.canDelete}
+                              disabled={!perm.canRead || mode === 'view'}
+                              onChange={() => handlePermissionToggle(module.id, 'canDelete')}
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="mt-5 pt-4 border-top d-flex gap-3">
+            {mode !== 'view' && (
+              <button 
+                type="submit" 
+                className="btn btn-primary px-5 py-2 fw-bold shadow-accent rounded-pill d-flex align-items-center gap-2"
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? (
+                  <>
+                    <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                    <span>{mode === 'create' ? 'Creating...' : 'Saving...'}</span>
+                  </>
+                ) : (
+                  mode === 'create' ? 'Create User Account' : 'Save Changes'
+                )}
+              </button>
+            )}
+            <button 
+              type="button" 
+              className="btn btn-outline-secondary px-5 py-2 fw-bold rounded-pill"
+              onClick={() => router.push('/users')}
+            >
+              Back to Users
+            </button>
+          </div>
+        </form>
+      </div>
+      {modal.isOpen && (
+        <FullPageStatus 
+          type={modal.type}
+          title={modal.title}
+          message={modal.message}
+          onClose={() => {
+            setModal(prev => ({ ...prev, isOpen: false }));
+            if (modal.type === 'success') router.push('/users');
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+export default CompanyUserForm;

@@ -1,0 +1,325 @@
+'use client';
+// Force re-evaluation to fix 404 glitch - Triggered reload
+
+import React from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import Link from 'next/link';
+import { RootState, AppDispatch } from '@/redux/store';
+import { checkActionPermission } from '@/config/permissions';
+import { fetchDashboardStats, fetchAuditLogs } from '@/redux/features/dashboardSlice';
+import { fetchPendingPayments } from '@/redux/features/pendingPaymentSlice';
+
+export default function DashboardPage() {
+  const [mounted, setMounted] = React.useState(false);
+  const dispatch = useDispatch<AppDispatch>();
+  const { company, user } = useSelector((state: RootState) => state.auth);
+  const { stats: realStats, logs: auditLogs, loading } = useSelector((state: RootState) => state.dashboard);
+  const { aggregates: pendingAggregates } = useSelector((state: RootState) => state.pendingPayments);
+
+  React.useEffect(() => {
+    setMounted(true);
+    if (company?.id || user?.role === 'super_admin') {
+      dispatch(fetchDashboardStats());
+      dispatch(fetchAuditLogs());
+      if (company?.id) {
+        dispatch(fetchPendingPayments({ company_id: company.id }));
+      }
+    }
+  }, [dispatch, company?.id, user?.role]);
+  
+  if (!mounted) return <div className="h-100 d-flex align-items-center justify-content-center py-5"><div className="spinner-border text-secondary" role="status"></div></div>;
+
+  // Determine if we should show the global super admin view or a specific tenant view
+  const isViewingGlobal = user?.role === 'super_admin' && !company;
+
+
+  const stats = isViewingGlobal ? [
+    { label: 'Active Tenants', value: '12', change: '+2', icon: 'bi-building', color: 'primary', href: '/companies' },
+    { label: 'Total Users', value: '450', change: '+15', icon: 'bi-people', color: 'success', href: '/company-users' },
+    { label: 'Monthly Revenue', value: '₹12,400', change: '+8%', icon: 'bi-bank', color: 'info', href: '/payments/pending' },
+    { label: 'System Health', value: '99.9%', change: 'Stable', icon: 'bi-cpu', color: 'warning', href: '/dashboard' },
+  ] : [
+    { label: 'Total Invoiced', value: `${realStats?.summary.totalInvoiced.toLocaleString() || '0'}`, change: '+0%', icon: 'bi-currency-rupee', color: 'secondary', href: '/invoices?tab=ALL_LIST' },
+    { label: 'Pending Payments', value: `₹${pendingAggregates?.totalOutstanding?.toLocaleString() || realStats?.summary.pendingAmount.toLocaleString() || '0'}`, change: 'Live', icon: 'bi-clock-history', color: 'warning', href: '/payments/pending' },
+    { label: 'Customer Count', value: realStats?.summary.customerCount.toString() || '0', change: 'Active', icon: 'bi-people', color: 'success', href: '/customers' },
+    { label: 'Overdue Invoices', value: realStats?.summary.overdueCount.toString() || '0', change: '>30 Days', icon: 'bi-exclamation-triangle', color: 'danger', href: '/payments/pending' },
+  ];
+
+  return (
+    <div>
+      <div className="d-flex justify-content-between align-items-center mb-4">
+        <div>
+          <h4 className="fw-bold mb-1">
+            {isViewingGlobal ? 'Global System Console' : (company?.name || 'Company Dashboard')}
+          </h4>
+          <p className="text-muted small">
+            {isViewingGlobal ? 'Platform-wide monitoring and multi-tenant control.' : 'Operational overview and resource allocation.'}
+          </p>
+        </div>
+        {!isViewingGlobal && checkActionPermission(user, 'mod_invoice', 'create') && (
+          <Link href="/invoices/new" className="text-decoration-none">
+            <button className="btn btn-primary d-flex align-items-center shadow-sm rounded-pill px-4 py-2 border-0" style={{ backgroundColor: '#ff4081' }}>
+              <i className="bi bi-plus-lg me-2"></i> Create Invoice
+            </button>
+          </Link>
+        )}
+      </div>
+
+      <div className="row g-4 mb-4">
+        {stats.map((stat, idx) => (
+          <div className="col-12 col-md-6 col-lg-3" key={idx}>
+            <Link href={(stat as any).href || '#'} className="text-decoration-none">
+            <div className="card h-100 border-0 shadow-sm" style={{ cursor: 'pointer', transition: 'transform 0.15s ease, box-shadow 0.15s ease' }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-3px)'; (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 24px rgba(0,0,0,0.12)'; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.transform = ''; (e.currentTarget as HTMLElement).style.boxShadow = ''; }}
+            >
+              <div className="card-body p-4">
+                <div className="d-flex justify-content-between align-items-center mb-3">
+                  <div className={`p-3 rounded-3`} style={{ backgroundColor: stat.color === 'primary' ? 'var(--accent-soft)' : '', background: stat.color !== 'primary' ? `var(--${stat.color}-soft, rgba(0,0,0,0.05))` : '' }}>
+                    <i className={`bi ${stat.icon} fs-4`} style={{ color: stat.color === 'primary' ? 'var(--accent-color)' : '' }}></i>
+                  </div>
+                  <span className={`badge ${stat.change.includes('+') ? 'bg-success' : 'bg-info'} bg-opacity-10 text-${stat.change.includes('+') ? 'success' : 'info'} rounded-pill px-2 py-1 small`}>
+                    {stat.change}
+                  </span>
+                </div>
+                <h6 className="text-muted mb-1 small">{stat.label}</h6>
+                <h3 className="fw-bold mb-0">
+                  {stat.icon === 'bi-currency-rupee' || stat.label.toLowerCase().includes('revenue') ? (
+                    <>
+                      <span className="text-muted fw-normal me-1" style={{ fontSize: '0.9em' }}>₹</span>
+                      {stat.value.replace('₹', '')}
+                    </>
+                  ) : stat.value}
+                </h3>
+              </div>
+            </div>
+            </Link>
+          </div>
+        ))}
+      </div>
+
+      {!isViewingGlobal ? (
+        <>
+          <div className="row g-4 mb-5">
+            {/* Latest Invoices */}
+            <div className="col-12 col-lg-6">
+              <div className="card border-0 shadow-sm h-100">
+                <div className="card-header bg-white py-3 border-0 d-flex justify-content-between align-items-center">
+                  <h5 className="fw-bold mb-0">Latest Invoices</h5>
+                  <Link href="/invoices" className="btn btn-link link-primary p-0 text-decoration-none small">View All</Link>
+                </div>
+                <div className="card-body p-0">
+                  <div className="table-responsive">
+                    <table className="table table-hover align-middle mb-0">
+                      <thead className="table-light">
+                        <tr>
+                          <th className="border-0 ps-3 small fw-bold">Invoice #</th>
+                          <th className="border-0 small fw-bold">Customer</th>
+                          <th className="border-0 small fw-bold text-end">Amount</th>
+                          <th className="border-0 small fw-bold text-center">Status</th>
+
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {realStats?.latestInvoices && realStats.latestInvoices.length > 0 ? realStats.latestInvoices.slice(0, 10).map((inv) => (
+                          <tr key={inv.id}>
+                            <td className="ps-3 small fw-medium text-primary">
+                              {inv.invoice_no && inv.invoice_no !== 0 
+                                ? `#${String(inv.invoice_no).padStart(4, '0')}` 
+                                : `#${inv.id}`}
+                            </td>
+                            <td className="small text-truncate" style={{ maxWidth: '150px' }}>{inv.customer_name}</td>
+                            <td className="small text-end fw-bold">₹{parseFloat(inv.grand_total || '0').toLocaleString()}</td>
+                            <td className="text-center">
+                              <span className={`badge ${inv.status === 'paid' ? 'bg-success' : 'bg-warning'} bg-opacity-10 text-${inv.status === 'paid' ? 'success' : 'warning'} rounded-pill extra-small px-2`}>
+                                {inv.status}
+                              </span>
+                            </td>
+
+                          </tr>
+                        )) : (
+                          <tr>
+                            <td colSpan={4} className="text-center py-4 text-muted small">No recent invoices</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Latest Inward Entries */}
+            <div className="col-12 col-lg-6">
+              <div className="card border-0 shadow-sm h-100">
+                <div className="card-header bg-white py-3 border-0 d-flex justify-content-between align-items-center">
+                  <h5 className="fw-bold mb-0">Latest Inward Entries</h5>
+                  <Link href="/inward" className="btn btn-link link-primary p-0 text-decoration-none small">View All</Link>
+                </div>
+                <div className="card-body p-0">
+                  <div className="table-responsive">
+                    <table className="table table-hover align-middle mb-0">
+                      <thead className="table-light">
+                        <tr>
+                          <th className="border-0 ps-3 small fw-bold">Inward #</th>
+                          <th className="border-0 small fw-bold">Party</th>
+                          <th className="border-0 small fw-bold">Date</th>
+                          <th className="border-0 small fw-bold text-center">Status</th>
+
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {realStats?.latestInwards && realStats.latestInwards.length > 0 ? realStats.latestInwards.slice(0, 10).map((inw) => (
+                          <tr key={inw.id}>
+                            <td className="ps-3 small fw-medium text-primary">{inw.inward_no}</td>
+                            <td className="small text-truncate" style={{ maxWidth: '150px' }}>{inw.vendor_name || inw.customer_name || 'N/A'}</td>
+                            <td className="small text-muted">{inw.date ? new Date(inw.date).toLocaleDateString() : 'N/A'}</td>
+                            <td className="text-center">
+                              <span className="badge bg-info bg-opacity-10 text-info rounded-pill extra-small px-2">
+                                {inw.status || 'Received'}
+                              </span>
+                            </td>
+
+                          </tr>
+                        )) : (
+                          <tr>
+                            <td colSpan={4} className="text-center py-4 text-muted small">No recent inward entries</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="row g-4">
+            <div className="col-12 col-lg-8">
+              <div className="card border-0 shadow-sm h-100">
+                <div className="card-header bg-white py-3 border-0 d-flex justify-content-between align-items-center">
+                  <h5 className="fw-bold mb-0">Recent Activities</h5>
+                  <Link href="/ledger" className="btn btn-link link-primary p-0 text-decoration-none small">View All</Link>
+                </div>
+                <div className="card-body">
+                  <div className="table-responsive p-1">
+                    <table className="table table-hover align-middle">
+                      <thead className="table-light">
+                        <tr>
+                          <th className="border-0">User</th>
+                          <th className="border-0">Action</th>
+                          <th className="border-0">Status</th>
+                          <th className="border-0">Date</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {auditLogs.length > 0 ? auditLogs.slice(0, 10).map((log) => (
+                           <tr key={log.id}>
+                             <td>
+                               <div className="d-flex align-items-center">
+                                 <div className="bg-light rounded-circle me-3 d-flex align-items-center justify-content-center" style={{ width: '32px', height: '32px' }}>
+                                   {log.user_name.charAt(0)}
+                                 </div>
+                                 <div className="fw-semibold small">{log.user_name}</div>
+                               </div>
+                             </td>
+                             <td className="small">
+                               <span className="text-primary fw-bold text-capitalize x-small me-1">{log.action}</span> 
+                               {(() => {
+                                 const details = log.details ? JSON.parse(log.details) : null;
+                                 const displayId = details?.invoice_no || details?.business_id || log.entity_id;
+                                 return `${log.entity} #${displayId}`;
+                               })()}
+                             </td>
+                             <td><span className="badge bg-success bg-opacity-10 text-success rounded-pill px-2 py-1">Success</span></td>
+                             <td className="text-muted x-small">{new Date(log.created_at).toLocaleDateString()}</td>
+                           </tr>
+                         )) : (
+                            <tr>
+                              <td colSpan={4} className="text-center py-4 text-muted small">No recent activities found</td>
+                           </tr>
+                         )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="col-12 col-lg-4">
+              <div className="card border-0 shadow-sm h-100">
+                <div className="card-header bg-white py-3 border-0 d-flex justify-content-between align-items-center">
+                  <div>
+                    <h5 className="fw-bold mb-0 text-warning">Pending Payments</h5>
+                    <p className="text-muted x-small mb-0">Latest 10 invoices awaiting payment</p>
+                  </div>
+                  <Link href="/invoices/status" className="btn btn-link link-warning p-0 text-decoration-none small">View All</Link>
+                </div>
+                <div className="card-body">
+                  <div className="d-flex flex-column gap-3">
+                    {realStats?.overdueInvoices && realStats.overdueInvoices.length > 0 ? (
+                      realStats.overdueInvoices.slice(0, 10).map((inv, idx) => (
+                        <div key={idx} className="p-2 border rounded bg-warning bg-opacity-10 border-warning border-opacity-25">
+                          <div className="d-flex justify-content-between align-items-start">
+                            <div>
+                              <div className="fw-bold small text-warning">
+                                {inv.invoice_no && inv.invoice_no !== 0 
+                                  ? `INV-${String(inv.invoice_no).padStart(4, '0')}` 
+                                  : `INV-${inv.id}`}
+                              </div>
+                              <div className="text-muted extra-small">{inv.customer}</div>
+                            </div>
+                            <div className="text-end">
+                              <div className="fw-bold small text-dark">₹{inv.pending.toLocaleString()}</div>
+                              <div className="text-muted extra-small">{new Date(inv.due_date).toLocaleDateString()}</div>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center py-4 text-muted small">
+                        <i className="bi bi-check2-circle text-success d-block fs-3 mb-2"></i>
+                        No overdue payments!
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="row g-4">
+          <div className="col-12">
+            <div className="card border-0 shadow-sm">
+              <div className="card-header bg-white py-3 border-0">
+                <h5 className="fw-bold mb-0">System Overview</h5>
+              </div>
+              <div className="card-body">
+                <p className="text-muted">Welcome to the Super Admin Control Center. Use the sidebar to manage companies and platform-wide settings.</p>
+                <div className="alert alert-info border-0 shadow-none">
+                  <i className="bi bi-info-circle-fill me-2"></i>
+                  Tip: You are viewing global metrics across all registered tenants.
+                </div>
+                
+                <div className="row mt-4">
+                  <div className="col-md-6 mb-3">
+                    <div className="border rounded p-3 bg-light">
+                      <h6 className="fw-bold"><i className="bi bi-gear-fill me-2 text-primary"></i> Platform Settings</h6>
+                      <p className="small text-muted mb-0">Configure global parameters, subscription plans, and available modules.</p>
+                    </div>
+                  </div>
+                  <div className="col-md-6 mb-3">
+                    <div className="border rounded p-3 bg-light">
+                      <h6 className="fw-bold"><i className="bi bi-shield-check me-2 text-success"></i> Security Audit</h6>
+                      <p className="small text-muted mb-0">Review system access logs and security performance metrics.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
